@@ -1,22 +1,13 @@
-# Audit checklist local
+# Audit checklist
 
-- [x] Fichiers Railway à la racine
-- [x] start.sh exécutable
-- [x] requirements.txt présent
-- [x] compilation Python OK
-- [x] conversion DATABASE_URL Railway
-- [x] /start utilisateur
-- [x] /start deep-link vote_<id>
-- [x] panel admin
-- [x] création match
-- [x] vote privé
-- [x] tendance après vote
-- [x] suppression tendance à fermeture votes
-- [x] liens bannis
-- [x] mots interdits progressifs
-- [x] commandes groupe sanctionnées
-- [x] hash média réel
-- [x] messages entrée/sortie supprimés de façon ciblée
-- [x] verrouillage groupe unique
+- [x] Fichiers Railway racine
+- [x] requirements incluant greenlet
+- [x] conversion DATABASE_URL postgresql -> postgresql+asyncpg
+- [x] compilation Python
+- [x] panneaux rôle
+- [x] handlers privés
+- [x] handlers groupe
+- [x] scheduler
+- [x] PostgreSQL models
 
-Limites connues : Telegram ne permet pas toujours de supprimer certains éléments système visibles côté client selon le type de groupe/client. Le bot supprime ce qu'il reçoit comme message service.
+À tester en réel Telegram : suppression exacte des messages système join via invite link selon type de groupe et permissions.

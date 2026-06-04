@@ -1,43 +1,16 @@
-# Pronostic Sport Telegram Bot — Clean Final
+# Pronostic Sport Bot
 
-Bot Telegram Railway + PostgreSQL pour pronostics sportifs, tendances, modération et panel admin.
+Bot Telegram Railway + PostgreSQL conforme au cahier des charges validé.
 
 ## Déploiement Railway
-
-1. Créer un projet Railway.
+1. Créer un service Railway.
 2. Ajouter PostgreSQL.
-3. Uploader ce ZIP ou connecter le dépôt.
-4. Variables obligatoires :
+3. Mettre les variables `.env.example`.
+4. Déployer le ZIP ou le dépôt.
+5. Vérifier qu'une seule instance utilise le BOT_TOKEN.
 
-```env
-BOT_TOKEN=
-DATABASE_URL=
-GROUP_ID=-1003996641790
-SUPER_ADMIN_IDS=5296696302
-ADMIN_IDS=
-TRUSTED_IDS=
-TIMEZONE=Europe/Paris
-BOT_USERNAME=NomDuBotSansArobase
-```
+## Important
+Le bot doit être admin du groupe avec droits : supprimer messages, bannir, gérer permissions, créer liens d'invitation.
 
-5. Donner au bot les droits admin dans le groupe :
-- supprimer messages
-- bannir utilisateurs
-- restreindre utilisateurs
-- gérer groupe
-- gérer invitations
-
-## Démarrage
-
-Railway lance :
-
-```bash
-bash start.sh
-```
-
-## Notes importantes
-
-- Le bot utilise PostgreSQL async. Les URL `postgresql://` Railway sont converties automatiquement en `postgresql+asyncpg://`.
-- Les tables sont créées automatiquement au démarrage.
-- Le bot est verrouillé sur `GROUP_ID`.
-- Les messages d'entrée/sortie sont supprimés uniquement si Telegram les transmet comme messages service et si le bot a le droit de supprimer les messages.
+## Commande
+Railway lance `bash start.sh`.
