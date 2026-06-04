@@ -54,3 +54,6 @@ pytest
 ```
 
 Alembic est inclus. Par défaut, le bot peut créer les tables automatiquement au boot, mais pour une production stricte, utilisez les migrations.
+
+## Correctif Railway PostgreSQL
+Cette version convertit automatiquement `DATABASE_URL=postgresql://...` ou `postgres://...` en `postgresql+asyncpg://...` pour éviter l'erreur `ModuleNotFoundError: No module named psycopg2` avec SQLAlchemy async.
