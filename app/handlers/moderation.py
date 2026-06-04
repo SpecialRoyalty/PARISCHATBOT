@@ -12,7 +12,31 @@ settings=get_settings(); router=Router()
 
 async def silent_delete(m:Message):
     try: await m.delete()
-    except Exception: pass
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning('delete_failed chat=%s message=%s error=%s', getattr(getattr(m,'chat',None),'id',None), getattr(m,'message_id',None), e)
+
+
+def is_service_message(m: Message) -> bool:
+    """Détecte les messages système Telegram à supprimer immédiatement.
+    Inclut entrées/sorties, ajout via lien, changements de groupe et notifications
+    générées par certaines actions admin selon le client Telegram.
+    """
+    service_attrs = (
+        'new_chat_members', 'left_chat_member', 'new_chat_title', 'new_chat_photo',
+        'delete_chat_photo', 'group_chat_created', 'supergroup_chat_created',
+        'channel_chat_created', 'message_auto_delete_timer_changed', 'migrate_to_chat_id',
+        'migrate_from_chat_id', 'pinned_message', 'connected_website',
+        'proximity_alert_triggered', 'forum_topic_created', 'forum_topic_edited',
+        'forum_topic_closed', 'forum_topic_reopened', 'general_forum_topic_hidden',
+        'general_forum_topic_unhidden', 'write_access_allowed', 'users_shared',
+        'chat_shared', 'boost_added', 'sender_boost_count', 'chat_background_set',
+        'giveaway_created', 'giveaway', 'giveaway_winners', 'giveaway_completed',
+        'video_chat_scheduled', 'video_chat_started', 'video_chat_ended',
+        'video_chat_participants_invited', 'web_app_data'
+    )
+    return any(getattr(m, attr, None) for attr in service_attrs)
+
 
 async def ban_user(bot:Bot, chat_id:int, user_id:int):
     try: await bot.ban_chat_member(chat_id,user_id)
@@ -32,11 +56,13 @@ async def mute_user(bot:Bot, chat_id:int, user_id:int, days:int):
         if u: u.muted_until=until; await session.commit()
 
 
-@router.message((F.new_chat_members != None) | (F.left_chat_member != None))
+@router.message(F.chat.type.in_({'group','supergroup'}))
 async def delete_join_leave_service_messages(m: Message, bot: Bot):
-    """Supprime en priorité les messages système Telegram d'entrée/sortie.
+    """Supprime en priorité tous les messages système Telegram.
     Important : le bot doit être administrateur avec le droit Supprimer les messages.
     """
+    if not is_service_message(m):
+        return
     if m.chat.id != settings.GROUP_ID:
         await silent_delete(m)
         try:

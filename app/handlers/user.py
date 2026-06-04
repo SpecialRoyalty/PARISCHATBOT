@@ -10,7 +10,7 @@ from app.db.session import SessionLocal
 from app.db.models import Match, Prediction, Suggestion, User
 from app.keyboards import active_matches_kb, choice_kb, score_skip_kb, category_kb, admin_panel
 from app.services.common import upsert_user, SCORE_RE, is_admin, is_super, get_setting
-from app.services.matches import active_matches
+from app.services.matches import active_matches, publish_trend
 from app.config import get_settings
 settings=get_settings(); router=Router()
 
@@ -36,6 +36,10 @@ async def send_vote_private(bot: Bot, user_id: int, match_id: int) -> tuple[bool
 
 @router.message(F.text.startswith('/start'))
 async def start(message:Message, bot:Bot):
+    # Deep-link support : /start vote_123 depuis le bouton du groupe.
+    parts = (message.text or '').split(maxsplit=1)
+    start_arg = parts[1].strip() if len(parts) > 1 else ''
+
     async with SessionLocal() as session:
         existing = await session.get(User, message.from_user.id)
         first_start = existing is None
@@ -58,6 +62,16 @@ async def start(message:Message, bot:Bot):
                 await message.answer(welcome_text)
         except Exception:
             pass
+
+    if start_arg.startswith('vote_'):
+        try:
+            mid = int(start_arg.split('_', 1)[1])
+            ok, info = await send_vote_private(bot, message.from_user.id, mid)
+            if not ok:
+                await message.answer(info)
+            return
+        except Exception:
+            await message.answer('Impossible d’ouvrir ce pronostic. Voici les pronostics en cours :')
 
     await message.answer('Voici les pronostics en cours. Tu peux ouvrir un match et donner ton avis.', reply_markup=active_matches_kb(matches))
 
@@ -85,27 +99,32 @@ async def vote_choice(c:CallbackQuery, state:FSMContext):
     await c.answer()
 
 @router.callback_query(F.data.startswith('vote:score_skip:'))
-async def score_skip(c:CallbackQuery, state:FSMContext):
+async def score_skip(c:CallbackQuery, state:FSMContext, bot:Bot):
     data=await state.get_data(); mid=int(c.data.split(':')[-1])
-    await save_prediction(c.from_user.id, mid, data.get('choice'), None, c.message)
+    await save_prediction(bot, c.from_user.id, mid, data.get('choice'), None, c.message)
     await state.clear(); await c.answer()
 
 @router.message(VoteState.score)
-async def score_entered(message:Message, state:FSMContext):
+async def score_entered(message:Message, state:FSMContext, bot:Bot):
     if not SCORE_RE.match(message.text or ''):
         await message.answer('Format invalide. Exemple : 2-1 ou clique sur Je ne sais pas.'); return
     data=await state.get_data()
-    await save_prediction(message.from_user.id, data['match_id'], data['choice'], message.text.replace(':','-').replace(' ',''), message)
+    await save_prediction(bot, message.from_user.id, data['match_id'], data['choice'], message.text.replace(':','-').replace(' ',''), message)
     await state.clear()
 
-async def save_prediction(user_id:int, match_id:int, choice:str, score:str|None, target):
+async def save_prediction(bot:Bot, user_id:int, match_id:int, choice:str|None, score:str|None, target):
     async with SessionLocal() as session:
         m=await session.get(Match,match_id)
         if not m or m.status!='active' or m.starts_at <= datetime.utcnow():
             await target.answer('⛔ Les pronostics sont fermés.'); return
+        if choice not in {'A','B','DRAW'}:
+            await target.answer('Choix invalide. Recommence le pronostic.')
+            return
         session.add(Prediction(match_id=match_id,user_id=user_id,choice=choice,exact_score=score))
         try:
-            await session.commit(); await target.answer('✅ Pronostic enregistré. Tu ne peux voter qu’une seule fois pour ce match.')
+            await session.commit()
+            await publish_trend(bot, session, m)
+            await target.answer('✅ Pronostic enregistré. Tu ne peux voter qu’une seule fois pour ce match.')
         except IntegrityError:
             await session.rollback(); await target.answer('Tu as déjà pronostiqué pour ce match.')
 

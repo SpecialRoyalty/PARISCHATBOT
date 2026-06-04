@@ -146,7 +146,12 @@ async def super_router(c:CallbackQuery,state:FSMContext):
     await c.message.answer('Envoie le Telegram ID concerné.'); await c.answer()
 @router.message(RoleEdit.user_id)
 async def role_edit(m:Message,state:FSMContext):
-    data=await state.get_data(); uid=int((m.text or '0').strip())
+    data=await state.get_data()
+    try:
+        uid=int((m.text or '0').strip())
+    except ValueError:
+        await m.answer('ID invalide. Envoie uniquement le Telegram ID numérique.')
+        return
     mapping={'add_admin':'admin','remove_admin':'admin','add_trusted':'trusted','remove_trusted':'trusted'}
     role=mapping[data['role_action']]
     async with SessionLocal() as session:
