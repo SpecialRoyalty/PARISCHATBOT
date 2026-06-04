@@ -24,7 +24,13 @@ def trend_interval_minutes(participants:int)->int:
     return 30
 
 async def publish_match(bot:Bot, session, m:Match):
-    msg=await replace_group_message(bot,session,f'match:{m.id}:prono',match_text(m),match_vote_kb(m.id),m.image_file_id)
+    
+    try:
+        me = await bot.me()
+        bot_username = me.username
+    except Exception:
+        bot_username = None
+    msg=await replace_group_message(bot,session,f'match:{m.id}:prono',match_text(m),match_vote_kb(m.id, bot_username),m.image_file_id)
     m.last_prono_message_id=msg.message_id; await session.commit()
 
 async def publish_trend(bot:Bot, session, m:Match):
