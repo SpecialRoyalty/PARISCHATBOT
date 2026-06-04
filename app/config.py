@@ -1,19 +1,18 @@
+from __future__ import annotations
 from pydantic_settings import BaseSettings
-from typing import Set
+from pydantic import Field
+from zoneinfo import ZoneInfo
 
 
-def parse_ids(value: str | None) -> Set[int]:
+def _ids(value: str | None) -> set[int]:
     if not value:
         return set()
-    cleaned = value.replace('"', '').replace("'", '').replace(';', ',').strip()
-    out: Set[int] = set()
-    for part in cleaned.split(','):
-        part = part.strip()
-        if part:
-            try:
-                out.add(int(part))
-            except ValueError:
-                pass
+    out: set[int] = set()
+    for raw in value.replace(';', ',').split(','):
+        raw = raw.strip().strip('"').strip("'")
+        if raw:
+            try: out.add(int(raw))
+            except ValueError: pass
     return out
 
 class Settings(BaseSettings):
@@ -24,26 +23,26 @@ class Settings(BaseSettings):
     ADMIN_IDS: str = ""
     TRUSTED_IDS: str = ""
     TIMEZONE: str = "Europe/Paris"
-    BOT_USERNAME: str = ""
+    BOT_VERSION: str = "1.0.0"
+    RULES_HOURS: int = 2
+    SHARE_HOURS: int = 3
+    SUGGESTION_HOURS: int = 6
+    LEADERBOARD_HOURS: int = 5
+    TOP_INVITERS_HOUR: int = 12
 
     @property
     def db_url_async(self) -> str:
-        url = self.DATABASE_URL
+        url = self.DATABASE_URL.strip().strip('"').strip("'")
         if url.startswith('postgresql://'):
             return url.replace('postgresql://', 'postgresql+asyncpg://', 1)
-        if url.startswith('postgres://'):
-            return url.replace('postgres://', 'postgresql+asyncpg://', 1)
         return url
-
     @property
-    def super_admin_ids(self): return parse_ids(self.SUPER_ADMIN_IDS)
+    def super_admin_ids(self) -> set[int]: return _ids(self.SUPER_ADMIN_IDS)
     @property
-    def admin_ids(self): return parse_ids(self.ADMIN_IDS) | self.super_admin_ids
+    def admin_ids(self) -> set[int]: return _ids(self.ADMIN_IDS)
     @property
-    def trusted_ids(self): return parse_ids(self.TRUSTED_IDS)
-
-    class Config:
-        env_file = '.env'
-        extra = 'ignore'
+    def trusted_ids(self) -> set[int]: return _ids(self.TRUSTED_IDS)
+    @property
+    def tz(self): return ZoneInfo(self.TIMEZONE)
 
 settings = Settings()
