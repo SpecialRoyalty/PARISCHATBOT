@@ -18,6 +18,7 @@ def admin_panel(is_super: bool):
             [('👑 Ajouter Admin','super:add_admin'), ('🗑 Retirer Admin','super:remove_admin')],
             [('🛡 Ajouter Trusted','super:add_trusted'), ('🧹 Retirer Trusted','super:remove_trusted')],
             [('📜 Logs sécurité','super:logs'), ('⚙️ Paramètres','super:settings')],
+            [('👋 Config message /start','super:welcome')],
         ]
     return kb(rows)
 

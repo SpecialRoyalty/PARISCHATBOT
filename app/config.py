@@ -8,7 +8,7 @@ def parse_ids(raw: str | None) -> set[int]:
         return set()
     ids: set[int] = set()
     for x in raw.replace(';', ',').split(','):
-        x = x.strip()
+        x = x.strip().strip('\"').strip("'")
         if x:
             try:
                 ids.add(int(x))
