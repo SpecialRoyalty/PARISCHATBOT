@@ -29,14 +29,16 @@ async def start(message: Message, bot: Bot):
         await message.answer('✅ Panel admin', reply_markup=admin_panel(message.from_user.id in settings.super_admin_ids))
         return
     async with SessionLocal() as s:
-        u=await s.get(User,message.from_user.id); first=not u.welcome_seen; u.started=True; u.welcome_seen=True; await s.commit()
-    if first:
-        welcome=await get_setting('welcome_text','Bienvenue dans le bot Pronostic Sport. Ici tu peux consulter les pronostics en cours, donner ton avis et participer aux classements du groupe.')
-        photo=await get_setting('welcome_photo','')
-        if photo:
-            await message.answer_photo(photo, caption=welcome)
-        else:
-            await message.answer(welcome)
+        u=await s.get(User,message.from_user.id)
+        if u:
+            u.started=True; u.welcome_seen=True
+            await s.commit()
+    welcome=await get_setting('welcome_text','Bienvenue dans le bot Pronostic Sport. Ici tu peux consulter les pronostics en cours, donner ton avis et participer aux classements du groupe.')
+    photo=await get_setting('welcome_photo','')
+    if photo:
+        await message.answer_photo(photo, caption=welcome)
+    else:
+        await message.answer(welcome)
     matches=await active_matches()
     await message.answer('Voici les pronostics en cours. Tu peux ouvrir un match et donner ton avis.', reply_markup=active_kb(matches))
 
