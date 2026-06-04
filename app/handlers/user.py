@@ -19,6 +19,21 @@ class VoteState(StatesGroup):
 class SuggestState(StatesGroup):
     category=State(); title=State(); date=State(); image=State()
 
+async def send_vote_private(bot: Bot, user_id: int, match_id: int) -> tuple[bool, str]:
+    async with SessionLocal() as session:
+        m = await session.get(Match, match_id)
+        if not m or m.status != 'active' or m.starts_at <= datetime.utcnow():
+            return False, 'Pronostic fermé.'
+        exists = (await session.execute(select(Prediction).where(Prediction.match_id == match_id, Prediction.user_id == user_id))).scalar_one_or_none()
+        if exists:
+            return False, 'Tu as déjà pronostiqué pour ce match.'
+        text = f"Qui va gagner d’après vous ?\n\n{m.title}"
+        if m.image_file_id:
+            await bot.send_photo(user_id, m.image_file_id, caption=text, reply_markup=choice_kb(m.id, m.side_a, m.side_b))
+        else:
+            await bot.send_message(user_id, text, reply_markup=choice_kb(m.id, m.side_a, m.side_b))
+        return True, 'Pronostic envoyé.'
+
 @router.message(F.text.startswith('/start'))
 async def start(message:Message, bot:Bot):
     async with SessionLocal() as session:
@@ -51,19 +66,15 @@ async def vote_start(c:CallbackQuery, bot:Bot):
     mid=int(c.data.split(':')[-1])
     async with SessionLocal() as session:
         await upsert_user(session,c.from_user,bot)
-        m=await session.get(Match,mid)
-        if not m or m.status!='active' or m.starts_at <= datetime.utcnow():
-            await c.answer('Pronostic fermé', show_alert=True); return
-        exists=(await session.execute(select(Prediction).where(Prediction.match_id==mid, Prediction.user_id==c.from_user.id))).scalar_one_or_none()
-        if exists:
-            await c.answer('Tu as déjà pronostiqué pour ce match.',show_alert=True); return
-        text=f"Qui va gagner d’après vous ?\n\n{m.title}"
+    try:
+        ok, info = await send_vote_private(bot, c.from_user.id, mid)
+        await c.answer(info, show_alert=not ok)
+    except Exception:
         try:
-            if m.image_file_id: await bot.send_photo(c.from_user.id,m.image_file_id,caption=text,reply_markup=choice_kb(m.id,m.side_a,m.side_b))
-            else: await bot.send_message(c.from_user.id,text,reply_markup=choice_kb(m.id,m.side_a,m.side_b))
-            await c.answer('Je t’ai envoyé le pronostic en privé.')
+            me = await bot.me()
+            await c.answer('Ouvre la conversation privée avec le bot pour voter.', url=f'https://t.me/{me.username}?start=vote_{mid}')
         except Exception:
-            await c.answer('Démarre le bot en privé avant de voter.', show_alert=True)
+            await c.answer('Ouvre la conversation privée avec le bot pour voter.', show_alert=True)
 
 @router.callback_query(F.data.startswith('vote:choice:'))
 async def vote_choice(c:CallbackQuery, state:FSMContext):

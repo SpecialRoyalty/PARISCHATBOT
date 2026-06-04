@@ -31,6 +31,42 @@ async def mute_user(bot:Bot, chat_id:int, user_id:int, days:int):
         u=await session.get(User,user_id)
         if u: u.muted_until=until; await session.commit()
 
+
+@router.message((F.new_chat_members != None) | (F.left_chat_member != None))
+async def delete_join_leave_service_messages(m: Message, bot: Bot):
+    """Supprime en priorité les messages système Telegram d'entrée/sortie.
+    Important : le bot doit être administrateur avec le droit Supprimer les messages.
+    """
+    if m.chat.id != settings.GROUP_ID:
+        await silent_delete(m)
+        try:
+            await bot.leave_chat(m.chat.id)
+        except Exception:
+            pass
+        return
+    # enregistrer invitations si possible
+    if m.new_chat_members and m.invite_link and m.invite_link.invite_link:
+        async with SessionLocal() as session:
+            from app.db.models import InviteLink
+            il=(await session.execute(select(InviteLink).where(InviteLink.link==m.invite_link.invite_link))).scalar_one_or_none()
+            if il:
+                for user in m.new_chat_members:
+                    if not user.is_bot and user.id != il.user_id:
+                        try:
+                            session.add(Invitation(inviter_id=il.user_id,invited_id=user.id))
+                            from sqlalchemy import func
+                            count = (await session.execute(select(func.count(Invitation.id)).where(Invitation.inviter_id==il.user_id))).scalar() or 0
+                            count += 1
+                            for threshold, badge in [(5,'🥉 Ambassadeur Bronze'),(25,'🥈 Ambassadeur Argent'),(50,'🥇 Ambassadeur Or')]:
+                                if count >= threshold and not await session.get(Badge, {'user_id':il.user_id,'badge':badge}):
+                                    session.add(Badge(user_id=il.user_id,badge=badge))
+                            await session.commit()
+                        except Exception:
+                            await session.rollback()
+    await silent_delete(m)
+    if m.new_chat_members and any(u.is_bot for u in m.new_chat_members) and m.from_user:
+        await ban_user(bot,m.chat.id,m.from_user.id)
+
 @router.message(F.chat.type.in_({'group','supergroup'}))
 async def moderate_group(m:Message, bot:Bot):
     # groupe non autorisé
