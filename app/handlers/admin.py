@@ -1,246 +1,184 @@
-from __future__ import annotations
-from datetime import datetime
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy import select, func
+from sqlalchemy import select, delete
+from datetime import datetime
+from app.config import settings
+from app.keyboards import admin_panel, close_result
 from app.db.session import SessionLocal
-from app.db.models import Match, Role, ForbiddenWord, MediaHash, SecurityLog, Setting, Suggestion, User, Prediction, Badge, Invitation
-from app.keyboards import admin_panel, category_kb, close_match_kb
-from app.services.common import is_admin, is_super, is_trusted, set_setting, get_setting, log
-from app.services.matches import split_sides, publish_match, publish_trend, ranking_text, apply_result
-from app.config import get_settings
-settings=get_settings(); router=Router()
+from app.db.models import Match, ForbiddenWord, Prediction, User, Suggestion, SecurityLog
+from app.utils.text import split_title
+from app.services.core import publish_match, update_trend, set_setting, get_setting, send_leaderboard
 
-class MatchCreate(StatesGroup):
-    category=State(); image=State(); title=State(); starts=State(); ends=State()
-class RuleEdit(StatesGroup): text=State()
-class WordAdd(StatesGroup): word=State()
-class RoleEdit(StatesGroup): user_id=State()
-class CloseState(StatesGroup): score=State()
-class ClarifyState(StatesGroup): text=State()
-class WelcomeState(StatesGroup): text=State(); photo=State()
+router=Router()
+admin_state: dict[int, dict] = {}
 
-async def guard_admin(c_or_m):
-    uid=c_or_m.from_user.id
-    async with SessionLocal() as session: return await is_admin(session,uid)
+def is_admin(uid:int): return uid in settings.admin_ids
+def is_super(uid:int): return uid in settings.super_admin_ids
 
-@router.message(F.text.in_(['/admin','/panel']))
-async def panel(m:Message):
-    async with SessionLocal() as session:
-        if not await is_admin(session,m.from_user.id): return
-        sup=await is_super(session,m.from_user.id)
-    await m.answer('Panel admin', reply_markup=admin_panel(sup))
+@router.callback_query(F.data=='admin:create')
+async def create(cb:CallbackQuery):
+    if not is_admin(cb.from_user.id): return
+    admin_state[cb.from_user.id]={'flow':'create','step':'category'}
+    await cb.message.answer('Catégorie ? Foot / Basket / Tennis / Boxe / Autre')
+    await cb.answer()
 
-@router.callback_query(F.data.startswith('admin:'))
-async def admin_router(c:CallbackQuery, state:FSMContext, bot:Bot):
-    async with SessionLocal() as session:
-        if not await is_admin(session,c.from_user.id): await c.answer('Accès refusé',show_alert=True); return
-        sup=await is_super(session,c.from_user.id)
-    action=c.data.split(':')[1]
-    if action=='create_match':
-        await state.set_state(MatchCreate.category); await c.message.answer('Choisis la catégorie', reply_markup=category_kb('admin_cat'))
-    elif action=='active_matches':
-        async with SessionLocal() as session:
-            ms=(await session.execute(select(Match).where(Match.status.in_(['active','pending_result'])).order_by(Match.starts_at))).scalars().all()
-        text='📋 Matchs en cours\n\n'+'\n'.join([f"#{m.id} {m.title} — {m.status}" for m in ms]) if ms else 'Aucun match en cours.'
-        await c.message.answer(text)
-        for m in ms: await c.message.answer(f'Clôture #{m.id}', reply_markup=close_match_kb(m.id,m.side_a,m.side_b))
-    elif action=='closed_matches':
-        async with SessionLocal() as session:
-            ms=(await session.execute(select(Match).where(Match.status.in_(['closed','cancelled'])).order_by(Match.id.desc()).limit(20))).scalars().all()
-        await c.message.answer('✅ Matchs clôturés\n\n'+'\n'.join([f"#{m.id} {m.title} — {m.winner or m.status} {m.final_score or ''}" for m in ms]) if ms else 'Aucun match clôturé.')
-    elif action=='stats':
-        async with SessionLocal() as session:
-            users=(await session.execute(select(func.count(User.id)))).scalar() or 0
-            matches=(await session.execute(select(func.count(Match.id)))).scalar() or 0
-            preds=(await session.execute(select(func.count()).select_from(Prediction))).scalar() or 0
-            rank=await ranking_text(session,5)
-        await c.message.answer(f'📊 Statistiques\nUtilisateurs: {users}\nMatchs: {matches}\nPronostics: {preds}\n\n{rank}')
-    elif action=='words':
-        await state.set_state(WordAdd.word); await c.message.answer('Envoie un mot interdit à ajouter. Pour supprimer : -mot')
-    elif action=='rules':
-        await state.set_state(RuleEdit.text); await c.message.answer('Envoie le texte des règles qui tournera toutes les 2h.')
-    elif action=='close_group':
-        from aiogram.types import ChatPermissions
-        await bot.set_chat_permissions(settings.GROUP_ID, ChatPermissions(can_send_messages=False, can_send_photos=False, can_send_videos=False, can_send_documents=False, can_send_audios=False, can_send_voice_notes=False, can_send_video_notes=False))
-        await c.message.answer('🔒 Groupe fermé.');
-    elif action=='open_group':
-        from aiogram.types import ChatPermissions
-        await bot.set_chat_permissions(settings.GROUP_ID, ChatPermissions(can_send_messages=True, can_send_photos=True, can_send_videos=True, can_send_documents=True, can_send_audios=True, can_send_voice_notes=True, can_send_video_notes=True, can_send_polls=True, can_send_other_messages=True, can_add_web_page_previews=False))
-        await c.message.answer('🔓 Groupe ouvert.')
-    elif action=='media_hashes':
-        await c.message.answer('Envoie /ban en réponse à un média pour l’interdire définitivement. Le terme technique ne sera jamais affiché publiquement.')
-    elif action=='info':
-        db='✅ Connectée'
-        try:
-            async with SessionLocal() as session: await session.execute(select(func.count(Match.id)))
-        except Exception as e: db=f'❌ {e}'
-        send='✅ Fonctionnel'
-        try:
-            test=await bot.send_message(settings.GROUP_ID, 'test')
-            await bot.delete_message(settings.GROUP_ID, test.message_id)
-        except Exception as e: send=f'❌ {e}'
-        await c.message.answer(f"📊 Info\n\nBot : ✅ En ligne\nBase de données : {db}\nRailway : ✅ Process lancé\nTâches planifiées : ✅ Actives\nEnvoi messages : {send}\nGroupe principal : {settings.GROUP_ID}\nVersion : {settings.APP_VERSION}")
-    await c.answer()
-
-@router.callback_query(F.data.startswith('admin_cat:'))
-async def admin_cat(c:CallbackQuery,state:FSMContext):
-    await state.update_data(category=c.data.split(':',1)[1]); await state.set_state(MatchCreate.image); await c.message.answer('Envoie l’image du match.'); await c.answer()
-@router.message(MatchCreate.image, F.photo)
-async def match_image(m:Message,state:FSMContext):
-    await state.update_data(image=m.photo[-1].file_id); await state.set_state(MatchCreate.title); await m.answer('Entre le titre du match. Exemple : France 🇫🇷 vs Côte d’Ivoire 🇨🇮')
-@router.message(MatchCreate.title)
-async def match_title(m:Message,state:FSMContext):
-    await state.update_data(title=m.text); await state.set_state(MatchCreate.starts); await m.answer('Date de début au format YYYY-MM-DD HH:MM, exemple 2026-06-15 20:00')
-@router.message(MatchCreate.starts)
-async def match_starts(m:Message,state:FSMContext):
-    try: dt=datetime.strptime(m.text.strip(),'%Y-%m-%d %H:%M')
-    except Exception: await m.answer('Format invalide. Exemple : 2026-06-15 20:00'); return
-    await state.update_data(starts=dt); await state.set_state(MatchCreate.ends); await m.answer('Date de fin du match au format YYYY-MM-DD HH:MM')
-@router.message(MatchCreate.ends)
-async def match_ends(m:Message,state:FSMContext,bot:Bot):
-    try: ends=datetime.strptime(m.text.strip(),'%Y-%m-%d %H:%M')
-    except Exception: await m.answer('Format invalide. Exemple : 2026-06-15 22:00'); return
-    data=await state.get_data(); a,b=split_sides(data['title'])
-    async with SessionLocal() as session:
-        match=Match(category=data['category'],title=data['title'],side_a=a,side_b=b,image_file_id=data['image'],starts_at=data['starts'],votes_close_at=data['starts'],ends_at=ends,created_by=m.from_user.id,status='active')
-        session.add(match); await session.commit(); await session.refresh(match)
-        await publish_match(bot,session,match); await publish_trend(bot,session,match)
-    await m.answer(f'✅ Match créé et publié : #{match.id}'); await state.clear()
-
-@router.message(RuleEdit.text)
-async def rules_text(m:Message,state:FSMContext):
-    async with SessionLocal() as session: await set_setting(session,'rules_text',m.text)
-    await m.answer('✅ Règles enregistrées.'); await state.clear()
-@router.message(WordAdd.word)
-async def word_edit(m:Message,state:FSMContext):
-    txt=(m.text or '').strip().lower()
-    async with SessionLocal() as session:
-        if txt.startswith('-'):
-            obj=await session.get(ForbiddenWord,txt[1:]);
-            if obj: await session.delete(obj); await session.commit(); await m.answer('✅ Mot supprimé.')
-        else:
-            session.add(ForbiddenWord(word=txt,created_by=m.from_user.id)); await session.commit(); await m.answer('✅ Mot ajouté.')
-    await state.clear()
-
-@router.callback_query(F.data.startswith('super:'))
-async def super_router(c:CallbackQuery,state:FSMContext):
-    async with SessionLocal() as session:
-        if not await is_super(session,c.from_user.id): await c.answer('Super admin uniquement',show_alert=True); return
-        action=c.data.split(':')[1]
-        if action=='welcome':
-            await state.set_state(WelcomeState.text)
-            current_text = await get_setting(session, 'start_welcome_text', '')
-            await c.message.answer('Envoie le texte d’accueil privé pour les nouveaux utilisateurs.\n\nTexte actuel :\n' + (current_text or 'Non configuré'))
-            await c.answer(); return
-        if action=='logs':
-            logs=(await session.execute(select(SecurityLog).order_by(SecurityLog.id.desc()).limit(15))).scalars().all()
-            text='📜 Logs sécurité\n\n'+'\n'.join([f'#{l.id} {l.event} user={l.user_id} chat={l.chat_id} — {l.details[:80]}' for l in logs]) if logs else 'Aucun log.'
-            await c.message.answer(text); await c.answer(); return
-        if action=='settings':
-            await c.message.answer(f'⚙️ Paramètres\nPRONO_REPOST_MINUTES={settings.PRONO_REPOST_MINUTES}\nLEADERBOARD_HOURS={settings.LEADERBOARD_HOURS}\nRULES_HOURS={settings.RULES_HOURS}\nSHARE_HOURS={settings.SHARE_HOURS}\nSUGGESTION_HOURS={settings.SUGGESTION_HOURS}\nGROUP_ID={settings.GROUP_ID}')
-            await c.answer(); return
-    await state.update_data(role_action=action); await state.set_state(RoleEdit.user_id)
-    await c.message.answer('Envoie le Telegram ID concerné.'); await c.answer()
-@router.message(RoleEdit.user_id)
-async def role_edit(m:Message,state:FSMContext):
-    data=await state.get_data()
-    try:
-        uid=int((m.text or '0').strip())
-    except ValueError:
-        await m.answer('ID invalide. Envoie uniquement le Telegram ID numérique.')
+@router.message(F.chat.type=='private')
+async def admin_text(message:Message, bot:Bot):
+    st=admin_state.get(message.from_user.id)
+    if not st or not is_admin(message.from_user.id): return
+    if st.get('flow')=='result_score':
+        mid=st['match_id']; winner=st['winner']; score=message.text.strip().replace(':','-')
+        async with SessionLocal() as s:
+            m=await s.get(Match,mid); m.status='closed'; m.result_winner=winner; m.result_score=score
+            preds=(await s.execute(select(Prediction).where(Prediction.match_id==mid))).scalars().all()
+            for p in preds:
+                u=await s.get(User,p.user_id)
+                ok=p.winner==winner; exact=ok and p.score==score
+                p.is_correct=ok; p.exact=exact; u.total+=1
+                if ok: u.correct+=1; u.streak+=1
+                else: u.streak=0
+                if exact: u.exact_scores+=1
+            await s.commit()
+        admin_state.pop(message.from_user.id,None)
+        await message.answer('✅ Résultat enregistré et statistiques mises à jour.')
+        await send_leaderboard(bot)
         return
-    mapping={'add_admin':'admin','remove_admin':'admin','add_trusted':'trusted','remove_trusted':'trusted'}
-    role=mapping[data['role_action']]
-    async with SessionLocal() as session:
-        if data['role_action'].startswith('add'):
-            if not await session.get(Role,{'user_id':uid,'role':role}): session.add(Role(user_id=uid,role=role))
-            await session.commit(); await m.answer(f'✅ {role} ajouté : {uid}')
-        else:
-            obj=await session.get(Role,{'user_id':uid,'role':role})
-            if obj: await session.delete(obj)
-            await session.commit(); await m.answer(f'✅ {role} retiré : {uid}')
-    await state.clear()
-
-@router.callback_query(F.data.startswith('close:winner:'))
-async def close_winner(c:CallbackQuery,state:FSMContext):
-    _,_,mid,winner=c.data.split(':')
-    if winner=='CANCEL':
-        async with SessionLocal() as session: await apply_result(session,int(mid),'CANCEL',None)
-        await c.message.answer('Match annulé.'); await c.answer(); return
-    await state.update_data(close_mid=int(mid), close_winner=winner); await state.set_state(CloseState.score)
-    await c.message.answer('Score exact final ? Exemple : 2-1'); await c.answer()
-@router.message(CloseState.score)
-async def close_score(m:Message,state:FSMContext):
-    data=await state.get_data()
-    async with SessionLocal() as session: mt=await apply_result(session,data['close_mid'],data['close_winner'],m.text.strip())
-    await m.answer(f'✅ Résultat clôturé pour {mt.title}.'); await state.clear()
-
-@router.callback_query(F.data.startswith('sugg:'))
-async def sugg_admin(c:CallbackQuery, state:FSMContext):
-    _,action,sid=c.data.split(':'); sid=int(sid)
-    async with SessionLocal() as session:
-        s=await session.get(Suggestion,sid)
-        if not s:
-            await c.answer('Suggestion introuvable', show_alert=True); return
-        if action == 'clarify':
-            await state.update_data(clarify_suggestion_id=sid)
-            await state.set_state(ClarifyState.text)
-            await c.message.answer(f'Envoie la question à transmettre à l’utilisateur pour la suggestion #{sid}.')
-            await c.answer(); return
-        s.status={'accept':'accepted','refuse':'refused'}[action]
-        if action == 'accept':
-            u=await session.get(User,s.user_id)
-            if u:
-                u.accepted_suggestions += 1
-                if u.accepted_suggestions >= 5 and not await session.get(Badge, {'user_id':u.id,'badge':'🧠 Scout'}): session.add(Badge(user_id=u.id,badge='🧠 Scout'))
-                if u.accepted_suggestions >= 25 and not await session.get(Badge, {'user_id':u.id,'badge':'🎖 Analyste'}): session.add(Badge(user_id=u.id,badge='🎖 Analyste'))
-                if u.accepted_suggestions >= 50 and not await session.get(Badge, {'user_id':u.id,'badge':'👑 Recruteur Officiel'}): session.add(Badge(user_id=u.id,badge='👑 Recruteur Officiel'))
-        await session.commit()
-    await c.message.answer(f'Suggestion #{sid} : {action}'); await c.answer()
-
-
-@router.message(ClarifyState.text)
-async def clarify_suggestion_send(m:Message, state:FSMContext, bot:Bot):
-    data = await state.get_data()
-    sid = int(data.get('clarify_suggestion_id', 0))
-    async with SessionLocal() as session:
-        s = await session.get(Suggestion, sid)
-        if not s:
-            await m.answer('Suggestion introuvable.'); await state.clear(); return
-        s.status = 'needs_precision'
-        await session.commit()
-        try:
-            await bot.send_message(s.user_id, f'❓ La modération demande une précision sur ta suggestion :\n\n{m.text}')
-            await m.answer('✅ Demande de précision envoyée à l’utilisateur.')
-        except Exception as e:
-            await m.answer(f'⚠️ Impossible de contacter l’utilisateur: {e}')
-    await state.clear()
-
-
-@router.message(WelcomeState.text)
-async def welcome_text_set(m:Message, state:FSMContext):
-    async with SessionLocal() as session:
-        if not await is_super(session, m.from_user.id):
-            await m.answer('Super admin uniquement.'); await state.clear(); return
-        await set_setting(session, 'start_welcome_text', m.text or '')
-    await state.set_state(WelcomeState.photo)
-    await m.answer('✅ Texte enregistré. Envoie maintenant la photo d’accueil, ou écris : non pour garder/supprimer la photo actuelle.')
-
-@router.message(WelcomeState.photo)
-async def welcome_photo_set(m:Message, state:FSMContext):
-    async with SessionLocal() as session:
-        if not await is_super(session, m.from_user.id):
-            await m.answer('Super admin uniquement.'); await state.clear(); return
-        if m.photo:
-            await set_setting(session, 'start_welcome_photo', m.photo[-1].file_id)
-            await m.answer('✅ Photo d’accueil enregistrée. Les nouveaux utilisateurs la recevront au premier /start.')
-        elif (m.text or '').strip().lower() in {'non','no','aucune','supprimer','delete'}:
-            await set_setting(session, 'start_welcome_photo', '')
-            await m.answer('✅ Photo d’accueil supprimée ou ignorée.')
-        else:
-            await m.answer('Envoie une photo, ou écris : non')
+    if st['flow']=='create':
+        step=st['step']
+        if step=='category': st['category']=message.text.strip(); st['step']='photo'; await message.answer('Envoie l’image du match.'); return
+        if step=='photo':
+            if message.photo: st['photo_file_id']=message.photo[-1].file_id; st['step']='title'; await message.answer('Titre du match ? Exemple : France 🇫🇷 vs Côte d’Ivoire 🇨🇮')
+            else: await message.answer('Envoie une image.')
             return
-    await state.clear()
+        if step=='title': st['title']=message.text.strip(); st['step']='start'; await message.answer('Date/heure début votes fermés ? Format UTC : 2026-06-15 20:00'); return
+        if step=='start':
+            try: st['start_at']=datetime.strptime(message.text.strip(),'%Y-%m-%d %H:%M')
+            except ValueError: await message.answer('Format invalide : 2026-06-15 20:00'); return
+            st['step']='end'; await message.answer('Date/heure fin match approximative ? Format UTC : 2026-06-15 22:00'); return
+        if step=='end':
+            try: end=datetime.strptime(message.text.strip(),'%Y-%m-%d %H:%M')
+            except ValueError: await message.answer('Format invalide.'); return
+            a,b=split_title(st['title'])
+            async with SessionLocal() as s:
+                m=Match(category=st['category'], title=st['title'], option_a=a, option_b=b, photo_file_id=st.get('photo_file_id'), start_at=st['start_at'], vote_close_at=st['start_at'], end_at=end, created_by=message.from_user.id)
+                s.add(m); await s.commit(); await s.refresh(m)
+                mid=m.id
+            admin_state.pop(message.from_user.id,None)
+            async with SessionLocal() as s: m=await s.get(Match,mid)
+            await publish_match(bot,m); await update_trend(bot,mid)
+            await message.answer(f'✅ Match créé #{mid}')
+    elif st['flow']=='rules':
+        await set_setting('rules_text', message.text)
+        admin_state.pop(message.from_user.id,None); await message.answer('✅ Règles enregistrées.')
+    elif st['flow']=='welcome_text':
+        await set_setting('welcome_text', message.text)
+        admin_state.pop(message.from_user.id,None); await message.answer('✅ Message /start enregistré.')
+    elif st['flow']=='welcome_photo':
+        if message.photo:
+            await set_setting('welcome_photo', message.photo[-1].file_id)
+            admin_state.pop(message.from_user.id,None); await message.answer('✅ Photo /start enregistrée.')
+        else: await message.answer('Envoie une photo.')
+    elif st['flow']=='word_add':
+        async with SessionLocal() as s:
+            s.add(ForbiddenWord(word=message.text.lower().strip())); await s.commit()
+        admin_state.pop(message.from_user.id,None); await message.answer('✅ Mot interdit ajouté.')
+
+@router.callback_query(F.data=='admin:active')
+async def active(cb:CallbackQuery):
+    if not is_admin(cb.from_user.id): return
+    async with SessionLocal() as s:
+        ms=(await s.execute(select(Match).where(Match.status.in_(['active','locked'])).order_by(Match.start_at))).scalars().all()
+    if not ms: await cb.message.answer('Aucun match actif/verrouillé.'); return
+    for m in ms:
+        await cb.message.answer(f'#{m.id} {m.title}\nStatut: {m.status}\nDébut: {m.start_at}', reply_markup=close_result(m) if m.status=='locked' else None)
+    await cb.answer()
+
+@router.callback_query(F.data.startswith('result:'))
+async def result_pick(cb:CallbackQuery):
+    if not is_admin(cb.from_user.id): return
+    _, mid, winner=cb.data.split(':'); mid=int(mid)
+    if winner=='cancel':
+        async with SessionLocal() as s:
+            m=await s.get(Match,mid); m.status='cancelled'; await s.commit()
+        await cb.message.answer('🚫 Match annulé.'); return
+    admin_state[cb.from_user.id]={'flow':'result_score','match_id':mid,'winner':winner}
+    await cb.message.answer('Score exact final ? Exemple : 2-1')
+    await cb.answer()
+
+@router.message(F.chat.type=='private')
+async def result_score(message:Message, bot:Bot):
+    st=admin_state.get(message.from_user.id)
+    if not st or st.get('flow')!='result_score': return
+    mid=st['match_id']; winner=st['winner']; score=message.text.strip().replace(':','-')
+    async with SessionLocal() as s:
+        m=await s.get(Match,mid); m.status='closed'; m.result_winner=winner; m.result_score=score
+        preds=(await s.execute(select(Prediction).where(Prediction.match_id==mid))).scalars().all()
+        for p in preds:
+            u=await s.get(User,p.user_id)
+            ok=p.winner==winner; exact=ok and p.score==score
+            p.is_correct=ok; p.exact=exact; u.total+=1
+            if ok: u.correct+=1; u.streak+=1
+            else: u.streak=0
+            if exact: u.exact_scores+=1
+        await s.commit()
+    admin_state.pop(message.from_user.id,None)
+    await message.answer('✅ Résultat enregistré et statistiques mises à jour.')
+    await send_leaderboard(bot)
+
+@router.callback_query(F.data=='admin:rules')
+async def rules(cb:CallbackQuery):
+    if not is_admin(cb.from_user.id): return
+    admin_state[cb.from_user.id]={'flow':'rules'}
+    await cb.message.answer('Envoie le texte complet des règles.'); await cb.answer()
+
+@router.callback_query(F.data=='admin:words')
+async def words(cb:CallbackQuery):
+    if not is_admin(cb.from_user.id): return
+    admin_state[cb.from_user.id]={'flow':'word_add'}
+    await cb.message.answer('Envoie un mot interdit à ajouter.'); await cb.answer()
+
+@router.callback_query(F.data=='admin:close_group')
+async def close_group(cb:CallbackQuery, bot:Bot):
+    if not is_admin(cb.from_user.id): return
+    await bot.set_chat_permissions(settings.GROUP_ID, permissions={'can_send_messages':False})
+    await cb.message.answer('🔒 Groupe fermé.'); await cb.answer()
+
+@router.callback_query(F.data=='admin:open_group')
+async def open_group(cb:CallbackQuery, bot:Bot):
+    if not is_admin(cb.from_user.id): return
+    await bot.set_chat_permissions(settings.GROUP_ID, permissions={'can_send_messages':True,'can_send_photos':True,'can_send_videos':True,'can_send_other_messages':True})
+    await cb.message.answer('🔓 Groupe ouvert.'); await cb.answer()
+
+@router.callback_query(F.data=='admin:info')
+async def info(cb:CallbackQuery, bot:Bot):
+    if not is_admin(cb.from_user.id): return
+    db='✅'
+    try:
+        async with SessionLocal() as s: await s.execute(select(User).limit(1))
+    except Exception: db='❌'
+    msgok='✅'
+    try: await bot.get_chat(settings.GROUP_ID)
+    except Exception: msgok='❌'
+    await cb.message.answer(f'ℹ️ Diagnostic\nBot : ✅\nBase de données : {db}\nGroupe principal : {msgok}\nMessages : {msgok}\nVersion : clean-final')
+    await cb.answer()
+
+@router.callback_query(F.data=='admin:startcfg')
+async def startcfg(cb:CallbackQuery):
+    if not is_super(cb.from_user.id): return
+    admin_state[cb.from_user.id]={'flow':'welcome_text'}
+    await cb.message.answer('Envoie le texte de bienvenue /start. Pour la photo, clique ensuite de nouveau et envoie une photo avec commande interne non nécessaire dans cette version.')
+    await cb.answer()
+
+@router.callback_query(F.data=='admin:logs')
+async def logs(cb:CallbackQuery):
+    if not is_super(cb.from_user.id): return
+    async with SessionLocal() as s:
+        rows=(await s.execute(select(SecurityLog).order_by(SecurityLog.created_at.desc()).limit(10))).scalars().all()
+    await cb.message.answer('\n'.join([f'{r.created_at} {r.action} {r.details or ""}' for r in rows]) or 'Aucun log')
+    await cb.answer()
+
+@router.callback_query(F.data=='admin:roles')
+async def roles(cb:CallbackQuery):
+    if not is_super(cb.from_user.id): return
+    await cb.message.answer('Rôles actuels chargés depuis variables Railway : SUPER_ADMIN_IDS, ADMIN_IDS, TRUSTED_IDS. Pour sécurité production, modifie-les dans Railway puis redéploie.')
+    await cb.answer()

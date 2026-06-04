@@ -1,157 +1,102 @@
-from __future__ import annotations
-from datetime import datetime
 from aiogram import Router, F, Bot
+from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from datetime import datetime
 from app.db.session import SessionLocal
-from app.db.models import Match, Prediction, Suggestion, User
-from app.keyboards import active_matches_kb, choice_kb, score_skip_kb, category_kb, admin_panel
-from app.services.common import upsert_user, SCORE_RE, is_admin, is_super, get_setting
-from app.services.matches import active_matches, publish_trend
-from app.config import get_settings
-settings=get_settings(); router=Router()
+from app.db.models import User, Match, Prediction
+from app.config import settings
+from app.keyboards import active_matches as active_kb, winner_keyboard, score_skip
+from app.services.core import upsert_user, active_matches, get_setting, update_trend
+from app.utils.text import valid_score
 
-class VoteState(StatesGroup):
-    score=State()
-class SuggestState(StatesGroup):
-    category=State(); title=State(); date=State(); image=State()
+router=Router()
+pending_scores: dict[int, tuple[int,str]] = {}
 
-async def send_vote_private(bot: Bot, user_id: int, match_id: int) -> tuple[bool, str]:
-    async with SessionLocal() as session:
-        m = await session.get(Match, match_id)
-        if not m or m.status != 'active' or m.starts_at <= datetime.utcnow():
-            return False, 'Pronostic fermé.'
-        exists = (await session.execute(select(Prediction).where(Prediction.match_id == match_id, Prediction.user_id == user_id))).scalar_one_or_none()
-        if exists:
-            return False, 'Tu as déjà pronostiqué pour ce match.'
-        text = f"Qui va gagner d’après vous ?\n\n{m.title}"
-        if m.image_file_id:
-            await bot.send_photo(user_id, m.image_file_id, caption=text, reply_markup=choice_kb(m.id, m.side_a, m.side_b))
+@router.message(CommandStart())
+async def start(message: Message, bot: Bot):
+    await upsert_user(message.from_user)
+    payload = (message.text or '').split(maxsplit=1)[1] if message.text and len(message.text.split())>1 else ''
+    if payload.startswith('vote_'):
+        mid=int(payload.replace('vote_',''))
+        await open_match_by_id(message, mid)
+        return
+    if message.from_user.id in settings.admin_ids:
+        from app.keyboards import admin_panel
+        await message.answer('✅ Panel admin', reply_markup=admin_panel(message.from_user.id in settings.super_admin_ids))
+        return
+    async with SessionLocal() as s:
+        u=await s.get(User,message.from_user.id); first=not u.welcome_seen; u.started=True; u.welcome_seen=True; await s.commit()
+    if first:
+        welcome=await get_setting('welcome_text','Bienvenue dans le bot Pronostic Sport. Ici tu peux consulter les pronostics en cours, donner ton avis et participer aux classements du groupe.')
+        photo=await get_setting('welcome_photo','')
+        if photo:
+            await message.answer_photo(photo, caption=welcome)
         else:
-            await bot.send_message(user_id, text, reply_markup=choice_kb(m.id, m.side_a, m.side_b))
-        return True, 'Pronostic envoyé.'
+            await message.answer(welcome)
+    matches=await active_matches()
+    await message.answer('Voici les pronostics en cours. Tu peux ouvrir un match et donner ton avis.', reply_markup=active_kb(matches))
 
-@router.message(F.text.startswith('/start'))
-async def start(message:Message, bot:Bot):
-    # Deep-link support : /start vote_123 depuis le bouton du groupe.
-    parts = (message.text or '').split(maxsplit=1)
-    start_arg = parts[1].strip() if len(parts) > 1 else ''
+async def open_match_by_id(message: Message, mid:int):
+    async with SessionLocal() as s:
+        m=await s.get(Match,mid)
+        if not m or m.status!='active' or m.vote_close_at<=datetime.utcnow():
+            await message.answer('⛔ Ce pronostic est fermé.'); return
+        existing=(await s.execute(select(Prediction).where(Prediction.match_id==mid,Prediction.user_id==message.from_user.id))).scalar_one_or_none()
+        if existing:
+            await message.answer('✅ Tu as déjà pronostiqué sur ce match.'); return
+        text=f"🏟 {m.title}\n\nQui va gagner d’après vous ?"
+        if m.photo_file_id: await message.answer_photo(m.photo_file_id, caption=text, reply_markup=winner_keyboard(m))
+        else: await message.answer(text, reply_markup=winner_keyboard(m))
 
-    async with SessionLocal() as session:
-        existing = await session.get(User, message.from_user.id)
-        first_start = existing is None
-        await upsert_user(session, message.from_user, bot)
-        matches = await active_matches(session)
-        admin = await is_admin(session, message.from_user.id)
-        sup = await is_super(session, message.from_user.id)
-        welcome_text = await get_setting(session, 'start_welcome_text', '')
-        welcome_photo = await get_setting(session, 'start_welcome_photo', '')
+@router.callback_query(F.data.startswith('openmatch:'))
+async def openmatch(cb: CallbackQuery):
+    mid=int(cb.data.split(':')[1])
+    await open_match_by_id(cb.message, mid)
+    await cb.answer()
 
-    if admin:
-        title = '👑 Panel Super Admin' if sup else '🛡 Panel Admin'
-        await message.answer(f'{title}\nTon ID est bien reconnu : {message.from_user.id}', reply_markup=admin_panel(sup))
+@router.callback_query(F.data.startswith('pick:'))
+async def pick(cb: CallbackQuery):
+    _, mid, winner = cb.data.split(':')
+    mid=int(mid)
+    async with SessionLocal() as s:
+        m=await s.get(Match,mid)
+        if not m or m.status!='active' or m.vote_close_at<=datetime.utcnow():
+            await cb.answer('Pronostic fermé', show_alert=True); return
+        existing=(await s.execute(select(Prediction).where(Prediction.match_id==mid,Prediction.user_id==cb.from_user.id))).scalar_one_or_none()
+        if existing:
+            await cb.answer('Déjà voté', show_alert=True); return
+    pending_scores[cb.from_user.id]=(mid,winner)
+    await cb.message.answer('🎯 Prédire le score exact ?\nFormat : 2-1', reply_markup=score_skip(mid))
+    await cb.answer()
 
-    if first_start and not admin and (welcome_text or welcome_photo):
+@router.callback_query(F.data.startswith('score_skip:'))
+async def skip_score(cb: CallbackQuery, bot: Bot):
+    mid=int(cb.data.split(':')[1])
+    if cb.from_user.id not in pending_scores:
+        await cb.answer('Session expirée', show_alert=True); return
+    _, winner=pending_scores.pop(cb.from_user.id)
+    await save_prediction(cb.from_user.id, mid, winner, None, bot)
+    await cb.message.answer('✅ Pronostic enregistré.')
+    await cb.answer()
+
+@router.message(F.chat.type=='private')
+async def private_text(message: Message, bot: Bot):
+    if message.from_user.id in pending_scores and valid_score(message.text or ''):
+        mid,winner=pending_scores.pop(message.from_user.id)
+        await save_prediction(message.from_user.id, mid, winner, message.text.strip().replace(':','-'), bot)
+        await message.answer('✅ Pronostic enregistré.')
+
+async def save_prediction(user_id:int, mid:int, winner:str, score:str|None, bot:Bot):
+    async with SessionLocal() as s:
+        u=await s.get(User,user_id)
+        if not u:
+            u=User(id=user_id); s.add(u)
+        p=Prediction(match_id=mid,user_id=user_id,winner=winner,score=score)
+        s.add(p)
         try:
-            if welcome_photo:
-                await bot.send_photo(message.from_user.id, welcome_photo, caption=welcome_text or 'Bienvenue 👋')
-            else:
-                await message.answer(welcome_text)
-        except Exception:
-            pass
-
-    if start_arg.startswith('vote_'):
-        try:
-            mid = int(start_arg.split('_', 1)[1])
-            ok, info = await send_vote_private(bot, message.from_user.id, mid)
-            if not ok:
-                await message.answer(info)
-            return
-        except Exception:
-            await message.answer('Impossible d’ouvrir ce pronostic. Voici les pronostics en cours :')
-
-    await message.answer('Voici les pronostics en cours. Tu peux ouvrir un match et donner ton avis.', reply_markup=active_matches_kb(matches))
-
-@router.callback_query(F.data.startswith('vote:start:'))
-async def vote_start(c:CallbackQuery, bot:Bot):
-    mid=int(c.data.split(':')[-1])
-    async with SessionLocal() as session:
-        await upsert_user(session,c.from_user,bot)
-    try:
-        ok, info = await send_vote_private(bot, c.from_user.id, mid)
-        await c.answer(info, show_alert=not ok)
-    except Exception:
-        try:
-            me = await bot.me()
-            await c.answer('Ouvre la conversation privée avec le bot pour voter.', url=f'https://t.me/{me.username}?start=vote_{mid}')
-        except Exception:
-            await c.answer('Ouvre la conversation privée avec le bot pour voter.', show_alert=True)
-
-@router.callback_query(F.data.startswith('vote:choice:'))
-async def vote_choice(c:CallbackQuery, state:FSMContext):
-    _,_,mid,choice=c.data.split(':')
-    await state.update_data(match_id=int(mid), choice=choice)
-    await state.set_state(VoteState.score)
-    await c.message.answer('Prédire le score exact ?\nFormat : 2-1', reply_markup=score_skip_kb(int(mid)))
-    await c.answer()
-
-@router.callback_query(F.data.startswith('vote:score_skip:'))
-async def score_skip(c:CallbackQuery, state:FSMContext, bot:Bot):
-    data=await state.get_data(); mid=int(c.data.split(':')[-1])
-    await save_prediction(bot, c.from_user.id, mid, data.get('choice'), None, c.message)
-    await state.clear(); await c.answer()
-
-@router.message(VoteState.score)
-async def score_entered(message:Message, state:FSMContext, bot:Bot):
-    if not SCORE_RE.match(message.text or ''):
-        await message.answer('Format invalide. Exemple : 2-1 ou clique sur Je ne sais pas.'); return
-    data=await state.get_data()
-    await save_prediction(bot, message.from_user.id, data['match_id'], data['choice'], message.text.replace(':','-').replace(' ',''), message)
-    await state.clear()
-
-async def save_prediction(bot:Bot, user_id:int, match_id:int, choice:str|None, score:str|None, target):
-    async with SessionLocal() as session:
-        m=await session.get(Match,match_id)
-        if not m or m.status!='active' or m.starts_at <= datetime.utcnow():
-            await target.answer('⛔ Les pronostics sont fermés.'); return
-        if choice not in {'A','B','DRAW'}:
-            await target.answer('Choix invalide. Recommence le pronostic.')
-            return
-        session.add(Prediction(match_id=match_id,user_id=user_id,choice=choice,exact_score=score))
-        try:
-            await session.commit()
-            await publish_trend(bot, session, m)
-            await target.answer('✅ Pronostic enregistré. Tu ne peux voter qu’une seule fois pour ce match.')
+            await s.commit()
         except IntegrityError:
-            await session.rollback(); await target.answer('Tu as déjà pronostiqué pour ce match.')
-
-@router.callback_query(F.data == 'suggest:start')
-async def suggest_start(c:CallbackQuery, state:FSMContext):
-    await state.set_state(SuggestState.category)
-    await c.message.answer('Choisis la catégorie :', reply_markup=category_kb('suggest_cat'))
-    await c.answer()
-
-@router.callback_query(F.data.startswith('suggest_cat:'))
-async def suggest_cat(c:CallbackQuery, state:FSMContext):
-    await state.update_data(category=c.data.split(':',1)[1]); await state.set_state(SuggestState.title)
-    await c.message.answer('Entre le titre du match. Exemple : France 🇫🇷 vs Côte d’Ivoire 🇨🇮'); await c.answer()
-
-@router.message(SuggestState.title)
-async def suggest_title(m:Message,state:FSMContext):
-    await state.update_data(title=m.text); await state.set_state(SuggestState.date); await m.answer('Date/heure si connue, sinon écris : inconnue')
-@router.message(SuggestState.date)
-async def suggest_date(m:Message,state:FSMContext):
-    await state.update_data(date=m.text); await state.set_state(SuggestState.image); await m.answer('Envoie une image optionnelle, ou écris : non')
-@router.message(SuggestState.image)
-async def suggest_image(m:Message,state:FSMContext, bot:Bot):
-    data=await state.get_data(); image=m.photo[-1].file_id if m.photo else None
-    async with SessionLocal() as session:
-        s=Suggestion(user_id=m.from_user.id,category=data['category'],title=data['title'],proposed_date=data['date'],image_file_id=image); session.add(s); await session.commit(); sid=s.id
-    from app.keyboards import suggestion_admin_kb
-    for aid in settings.admin_ids:
-        try: await bot.send_message(aid, f"Nouvelle suggestion de match\nCatégorie : {data['category']}\nMatch : {data['title']}\nDate : {data['date']}", reply_markup=suggestion_admin_kb(sid))
-        except Exception: pass
-    await m.answer('✅ Suggestion envoyée à la modération.'); await state.clear()
+            await s.rollback(); return
+    await update_trend(bot, mid)
