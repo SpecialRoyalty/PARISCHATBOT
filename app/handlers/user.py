@@ -7,9 +7,9 @@ from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from app.db.session import SessionLocal
-from app.db.models import Match, Prediction, Suggestion
-from app.keyboards import active_matches_kb, choice_kb, score_skip_kb, category_kb
-from app.services.common import upsert_user, SCORE_RE
+from app.db.models import Match, Prediction, Suggestion, User
+from app.keyboards import active_matches_kb, choice_kb, score_skip_kb, category_kb, admin_panel
+from app.services.common import upsert_user, SCORE_RE, is_admin, is_super, get_setting
 from app.services.matches import active_matches
 from app.config import get_settings
 settings=get_settings(); router=Router()
@@ -19,12 +19,32 @@ class VoteState(StatesGroup):
 class SuggestState(StatesGroup):
     category=State(); title=State(); date=State(); image=State()
 
-@router.message(F.text == '/start')
+@router.message(F.text.startswith('/start'))
 async def start(message:Message, bot:Bot):
     async with SessionLocal() as session:
+        existing = await session.get(User, message.from_user.id)
+        first_start = existing is None
         await upsert_user(session, message.from_user, bot)
-        matches=await active_matches(session)
-    await message.answer('Bienvenue 👋\nVoici les pronostics en cours. Tu peux ouvrir un match et donner ton avis.', reply_markup=active_matches_kb(matches))
+        matches = await active_matches(session)
+        admin = await is_admin(session, message.from_user.id)
+        sup = await is_super(session, message.from_user.id)
+        welcome_text = await get_setting(session, 'start_welcome_text', '')
+        welcome_photo = await get_setting(session, 'start_welcome_photo', '')
+
+    if admin:
+        title = '👑 Panel Super Admin' if sup else '🛡 Panel Admin'
+        await message.answer(f'{title}\nTon ID est bien reconnu : {message.from_user.id}', reply_markup=admin_panel(sup))
+
+    if first_start and not admin and (welcome_text or welcome_photo):
+        try:
+            if welcome_photo:
+                await bot.send_photo(message.from_user.id, welcome_photo, caption=welcome_text or 'Bienvenue 👋')
+            else:
+                await message.answer(welcome_text)
+        except Exception:
+            pass
+
+    await message.answer('Voici les pronostics en cours. Tu peux ouvrir un match et donner ton avis.', reply_markup=active_matches_kb(matches))
 
 @router.callback_query(F.data.startswith('vote:start:'))
 async def vote_start(c:CallbackQuery, bot:Bot):

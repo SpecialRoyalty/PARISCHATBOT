@@ -20,6 +20,7 @@ class WordAdd(StatesGroup): word=State()
 class RoleEdit(StatesGroup): user_id=State()
 class CloseState(StatesGroup): score=State()
 class ClarifyState(StatesGroup): text=State()
+class WelcomeState(StatesGroup): text=State(); photo=State()
 
 async def guard_admin(c_or_m):
     uid=c_or_m.from_user.id
@@ -129,6 +130,11 @@ async def super_router(c:CallbackQuery,state:FSMContext):
     async with SessionLocal() as session:
         if not await is_super(session,c.from_user.id): await c.answer('Super admin uniquement',show_alert=True); return
         action=c.data.split(':')[1]
+        if action=='welcome':
+            await state.set_state(WelcomeState.text)
+            current_text = await get_setting(session, 'start_welcome_text', '')
+            await c.message.answer('Envoie le texte d’accueil privé pour les nouveaux utilisateurs.\n\nTexte actuel :\n' + (current_text or 'Non configuré'))
+            await c.answer(); return
         if action=='logs':
             logs=(await session.execute(select(SecurityLog).order_by(SecurityLog.id.desc()).limit(15))).scalars().all()
             text='📜 Logs sécurité\n\n'+'\n'.join([f'#{l.id} {l.event} user={l.user_id} chat={l.chat_id} — {l.details[:80]}' for l in logs]) if logs else 'Aucun log.'
@@ -202,8 +208,34 @@ async def clarify_suggestion_send(m:Message, state:FSMContext, bot:Bot):
         s.status = 'needs_precision'
         await session.commit()
         try:
-            REPL
+            await bot.send_message(s.user_id, f'❓ La modération demande une précision sur ta suggestion :\n\n{m.text}')
             await m.answer('✅ Demande de précision envoyée à l’utilisateur.')
         except Exception as e:
             await m.answer(f'⚠️ Impossible de contacter l’utilisateur: {e}')
+    await state.clear()
+
+
+@router.message(WelcomeState.text)
+async def welcome_text_set(m:Message, state:FSMContext):
+    async with SessionLocal() as session:
+        if not await is_super(session, m.from_user.id):
+            await m.answer('Super admin uniquement.'); await state.clear(); return
+        await set_setting(session, 'start_welcome_text', m.text or '')
+    await state.set_state(WelcomeState.photo)
+    await m.answer('✅ Texte enregistré. Envoie maintenant la photo d’accueil, ou écris : non pour garder/supprimer la photo actuelle.')
+
+@router.message(WelcomeState.photo)
+async def welcome_photo_set(m:Message, state:FSMContext):
+    async with SessionLocal() as session:
+        if not await is_super(session, m.from_user.id):
+            await m.answer('Super admin uniquement.'); await state.clear(); return
+        if m.photo:
+            await set_setting(session, 'start_welcome_photo', m.photo[-1].file_id)
+            await m.answer('✅ Photo d’accueil enregistrée. Les nouveaux utilisateurs la recevront au premier /start.')
+        elif (m.text or '').strip().lower() in {'non','no','aucune','supprimer','delete'}:
+            await set_setting(session, 'start_welcome_photo', '')
+            await m.answer('✅ Photo d’accueil supprimée ou ignorée.')
+        else:
+            await m.answer('Envoie une photo, ou écris : non')
+            return
     await state.clear()
