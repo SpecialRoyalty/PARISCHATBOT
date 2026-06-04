@@ -27,7 +27,12 @@ def category_kb(prefix='cat'):
     return kb([[('⚽ Foot',f'{prefix}:Foot'),('🏀 Basket',f'{prefix}:Basket')],[('🎾 Tennis',f'{prefix}:Tennis'),('🥊 Boxe',f'{prefix}:Boxe')],[('➕ Autre',f'{prefix}:Autre')]])
 
 
-def match_vote_kb(match_id:int):
+def match_vote_kb(match_id:int, bot_username: str | None = None):
+    # Dans le groupe, on utilise un bouton URL deep-link.
+    # Telegram ne permet pas d'envoyer un message privé à un utilisateur qui n'a jamais démarré le bot.
+    # Le lien ouvre directement la conversation privée avec le bon match.
+    if bot_username:
+        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Je pronostique', url=f'https://t.me/{bot_username}?start=vote_{match_id}')]])
     return kb([[('Je pronostique', f'vote:start:{match_id}')]])
 
 
