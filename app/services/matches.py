@@ -1,115 +1,97 @@
-from __future__ import annotations
-from datetime import datetime, timedelta
-from sqlalchemy import select, func, desc
-from aiogram import Bot
-from app.db.models import Match, Prediction, UserStats, Badge, User
-from app.keyboards import match_vote_kb, close_match_kb
-from app.services.common import local_dt_str, anonymize, replace_group_message, now_utc
-from app.config import get_settings
-settings=get_settings()
+from datetime import datetime
+from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
+from app.db.session import SessionLocal
+from app.db.models import Match, Prediction, User, SecurityLog
+from app.config import settings
+from app.utils.text import parse_title, anonymize
 
+def fmt_dt(dt): return dt.strftime('%d/%m/%Y à %H:%M') if dt else 'Non définie'
 
-def split_sides(title:str):
-    for sep in [' vs ', ' VS ', ' Vs ', ' v ', ' - ', ' contre ']:
-        if sep in title:
-            a,b=title.split(sep,1); return a.strip(), b.strip()
-    return 'Équipe A','Équipe B'
+async def create_match(category,title,photo_file_id,start_at,end_at,created_by,status='active',proposed_by=None):
+    a,b=parse_title(title)
+    async with SessionLocal() as s:
+        m=Match(category=category,title=title,team_a=a,team_b=b,photo_file_id=photo_file_id,start_at=start_at,end_at=end_at,created_by=created_by,status=status,proposed_by=proposed_by)
+        s.add(m); await s.commit(); await s.refresh(m); return m
 
-def match_text(m:Match):
-    return f"🏟 {m.title}\n\n📅 Début : {local_dt_str(m.starts_at)}\n🏆 Catégorie : {m.category}\n\n👇 Donne ton pronostic"
+async def get_match(mid:int):
+    async with SessionLocal() as s: return await s.get(Match,mid)
+async def active_matches():
+    async with SessionLocal() as s:
+        res=await s.execute(select(Match).where(Match.status=='active').order_by(Match.start_at)); return res.scalars().all()
+async def closed_matches(limit=10):
+    async with SessionLocal() as s:
+        res=await s.execute(select(Match).where(Match.status.in_(['closed','cancelled'])).order_by(Match.id.desc()).limit(limit)); return res.scalars().all()
+async def pending_matches():
+    async with SessionLocal() as s:
+        res=await s.execute(select(Match).where(Match.status=='pending').order_by(Match.id.desc())); return res.scalars().all()
 
-def trend_interval_minutes(participants:int)->int:
-    if participants < 50: return 120
-    if participants <= 200: return 60
-    return 30
+async def match_stats(mid:int):
+    async with SessionLocal() as s:
+        total=(await s.execute(select(func.count(Prediction.id)).where(Prediction.match_id==mid))).scalar() or 0
+        counts={}
+        for w in ['a','b','draw']:
+            counts[w]=(await s.execute(select(func.count(Prediction.id)).where(Prediction.match_id==mid, Prediction.winner==w))).scalar() or 0
+        top10=(await s.execute(select(User.id).where(User.total_predictions>=10).order_by((User.good_predictions*1.0/User.total_predictions).desc(), User.total_predictions.desc()).limit(10))).scalars().all()
+        top_voted=(await s.execute(select(func.count(Prediction.id)).where(Prediction.match_id==mid, Prediction.user_id.in_(top10)))).scalar() if top10 else 0
+        return {'total':total,'a':counts['a'],'b':counts['b'],'draw':counts['draw'],'pa': round(counts['a']*100/total) if total else 0,'pb':round(counts['b']*100/total) if total else 0,'pd':round(counts['draw']*100/total) if total else 0,'top10':top_voted or 0}
 
-async def publish_match(bot:Bot, session, m:Match):
-    
-    try:
-        me = await bot.me()
-        bot_username = me.username
-    except Exception:
-        bot_username = None
-    msg=await replace_group_message(bot,session,f'match:{m.id}:prono',match_text(m),match_vote_kb(m.id, bot_username),m.image_file_id)
-    m.last_prono_message_id=msg.message_id; await session.commit()
+async def render_match_message(m:Match):
+    st=await match_stats(m.id)
+    return (f"🏟 {m.title}\n\n"
+            f"📅 Début : {fmt_dt(m.start_at)}\n"
+            f"🏁 Fin approx. : {fmt_dt(m.end_at)}\n"
+            f"🏆 Catégorie : {m.category}\n\n"
+            f"👥 {st['total']} participants\n\n"
+            f"{m.team_a} : {st['pa']}%\n"
+            f"{m.team_b} : {st['pb']}%\n"
+            f"🤝 Match nul : {st['pd']}%\n\n"
+            f"🔥 {st['top10']} membres du Top 10 ont déjà pronostiqué\n\n"
+            f"⚡ Faites votre pronostic avant le début du match !\n\n"
+            f"👇 Donne ton pronostic")
 
-async def publish_trend(bot:Bot, session, m:Match):
-    rows=(await session.execute(select(Prediction.choice, func.count(Prediction.id)).where(Prediction.match_id==m.id).group_by(Prediction.choice))).all()
-    counts={k:v for k,v in rows}; total=sum(counts.values())
-    def pct(k): return round((counts.get(k,0)*100/total),1) if total else 0
-    top_ids=[r[0] for r in (await session.execute(select(UserStats.user_id).where(UserStats.participations>=settings.MIN_RANKING_PARTICIPATIONS).order_by(desc(UserStats.correct*1.0/UserStats.participations),desc(UserStats.participations)).limit(10))).all()]
-    top_part=0
-    if top_ids:
-        top_part=(await session.execute(select(func.count(Prediction.id)).where(Prediction.match_id==m.id, Prediction.user_id.in_(top_ids)))).scalar_one()
-    text=f"📊 {m.title}\n\n👥 {total} participants\n\n{m.side_a} : {pct('A')}%\n{m.side_b} : {pct('B')}%\n🤝 Match nul : {pct('DRAW')}%\n\n🔥 {top_part} membres du Top 10 ont déjà pronostiqué\n\n⚡ Faites votre pronostic avant le début du match !"
-    msg=await replace_group_message(bot,session,f'match:{m.id}:trend',text,None,m.image_file_id)
-    m.last_trend_message_id=msg.message_id; await session.commit()
+async def save_vote(mid:int, user_id:int, winner:str, exact_score:str|None):
+    async with SessionLocal() as s:
+        m=await s.get(Match,mid)
+        if not m or m.status!='active' or datetime.utcnow()>=m.start_at:
+            return False,'closed'
+        p=Prediction(match_id=mid,user_id=user_id,winner=winner,exact_score=exact_score)
+        s.add(p)
+        try:
+            u=await s.get(User,user_id)
+            if u: u.total_predictions += 1
+            await s.commit(); return True,'ok'
+        except IntegrityError:
+            await s.rollback(); return False,'duplicate'
 
-async def active_matches(session):
-    return (await session.execute(select(Match).where(Match.status=='active', Match.starts_at>now_utc()).order_by(Match.starts_at))).scalars().all()
-
-async def close_due_matches(bot:Bot, session):
-    now=now_utc()
-    matches=(await session.execute(select(Match).where(Match.status=='active', Match.starts_at<=now))).scalars().all()
-    for m in matches:
-        m.status='pending_result'
-        for key in [f'match:{m.id}:prono', f'match:{m.id}:trend']:
-            from app.db.models import ScheduledMessage
-            sm=await session.get(ScheduledMessage,key)
-            if sm and sm.message_id:
-                try: await bot.delete_message(settings.GROUP_ID, sm.message_id)
+async def lock_started_matches(bot):
+    async with SessionLocal() as s:
+        res=await s.execute(select(Match).where(Match.status=='active', Match.start_at<=datetime.utcnow()))
+        for m in res.scalars().all():
+            m.status='locked'
+            if m.group_message_id:
+                try: await bot.delete_message(settings.GROUP_ID,m.group_message_id)
                 except Exception: pass
-        await session.commit()
-        for aid in settings.admin_ids:
-            try: await bot.send_message(aid, f"Le match {m.title} est commencé/terminé à clôturer.", reply_markup=close_match_kb(m.id,m.side_a,m.side_b))
-            except Exception: pass
+        await s.commit()
 
-async def apply_result(session, match_id:int, winner:str, final_score:str|None):
-    m=await session.get(Match,match_id); 
-    if not m: return None
-    m.winner=winner; m.final_score=final_score; m.status='cancelled' if winner=='CANCEL' else 'closed'
-    preds=(await session.execute(select(Prediction).where(Prediction.match_id==match_id))).scalars().all()
-    if winner!='CANCEL':
+async def matches_to_close():
+    async with SessionLocal() as s:
+        res=await s.execute(select(Match).where(Match.status=='locked', Match.end_at!=None, Match.end_at<=datetime.utcnow()))
+        return res.scalars().all()
+
+async def close_match(mid:int, winner:str, score:str|None):
+    async with SessionLocal() as s:
+        m=await s.get(Match,mid)
+        if not m: return None
+        m.status='closed'; m.result_winner=winner; m.result_score=score
+        preds=(await s.execute(select(Prediction).where(Prediction.match_id==mid))).scalars().all()
         for p in preds:
-            p.is_correct=(p.choice==winner)
-            p.score_exact_correct=bool(final_score and p.exact_score and p.exact_score.replace(':','-').replace(' ','')==final_score.replace(':','-').replace(' ',''))
-            st=await session.get(UserStats,p.user_id) or UserStats(user_id=p.user_id)
-            if st.user_id is None: pass
-            session.add(st)
-            st.participations += 1
-            if p.is_correct: st.correct += 1
-            if p.score_exact_correct: st.exact_scores += 1
-            u=await session.get(User,p.user_id)
+            good=(p.winner==winner)
+            exact=bool(score and p.exact_score==score)
+            p.is_good=good; p.is_exact=exact
+            u=await s.get(User,p.user_id)
             if u:
-                if p.is_correct: u.good_streak+=1; u.best_streak=max(u.best_streak,u.good_streak)
-                else: u.good_streak=0
-            await update_badges(session,p.user_id)
-    await session.commit(); return m
-
-async def update_badges(session,user_id:int):
-    st=await session.get(UserStats,user_id)
-    u=await session.get(User,user_id)
-    if not st: return
-    rate=st.correct/st.participations if st.participations else 0
-    badges=[]
-    if st.participations>=100 and rate>=.75: badges.append('🏆 Expert Sport')
-    if st.participations>=250 and rate>=.80: badges.append('👑 Légende')
-    if st.exact_scores>=10: badges.append('🎯 Tireur d’élite')
-    if u and u.good_streak>=10: badges.append('🔥 En feu')
-    if u and u.good_streak>=20: badges.append('⚡ Série légendaire')
-    if st.participations>=25: badges.append('💬 Actif')
-    if st.participations>=100: badges.append('📈 Régulier')
-    if st.participations>=500: badges.append('🚀 Vétéran')
-    for b in badges:
-        if not await session.get(Badge, {'user_id':user_id,'badge':b}): session.add(Badge(user_id=user_id,badge=b))
-
-async def ranking_text(session, limit=10):
-    rows=(await session.execute(select(UserStats,User).join(User,User.id==UserStats.user_id).where(UserStats.participations>=settings.MIN_RANKING_PARTICIPATIONS).order_by(desc(UserStats.correct*1.0/UserStats.participations),desc(UserStats.participations),desc(UserStats.exact_scores)).limit(limit))).all()
-    if not rows: return '🏆 TOP PRONOSTIQUEURS\n\nPas encore assez de participations.'
-    lines=['🏆 TOP PRONOSTIQUEURS\n']
-    medals=['🥇','🥈','🥉']
-    for i,(st,u) in enumerate(rows):
-        rate=round(st.correct*100/st.participations,1) if st.participations else 0
-        b=(await session.execute(select(Badge.badge).where(Badge.user_id==st.user_id).limit(1))).scalar_one_or_none() or ''
-        lines.append(f"{medals[i] if i<3 else '🏅'} {anonymize((u.first_name or u.username or str(u.id)))}\n📊 {rate}% de réussite\n📝 {st.participations} participations\n🎯 {st.exact_scores} scores exacts\n{b}\n")
-    return '\n'.join(lines)
+                if good: u.good_predictions += 1; u.current_streak += 1
+                else: u.current_streak = 0
+                if exact: u.exact_scores += 1
+        await s.commit(); return m
