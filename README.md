@@ -64,3 +64,9 @@ Cette version convertit automatiquement `DATABASE_URL=postgresql://...` ou `post
 - `/start` reconnaît les Super Admins/Admins et affiche directement le panel.
 - Les nouveaux utilisateurs non-admin reçoivent au premier `/start` un message d'accueil configurable + photo configurable, puis la liste des pronostics en cours.
 - Configuration du message/photo d'accueil : Panel Super Admin > 👋 Config message /start.
+
+
+## Notes Telegram - notifications entrée/sortie
+Le bot supprime tous les messages système qu'il reçoit (`new_chat_members`, `left_chat_member`, ajout via lien, changements de groupe, etc.).
+Il doit être administrateur avec le droit **Supprimer les messages**.
+Selon le client Telegram, une bulle temporaire de type « X deleted a message » peut apparaître lorsqu'un admin supprime manuellement un message système. Cette bulle n'est pas toujours envoyée aux bots via l'API et ne peut pas toujours être supprimée par code. La v8 ajoute un handler large pour supprimer tout service message reçu par le bot.
