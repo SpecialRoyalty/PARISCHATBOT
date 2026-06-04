@@ -1,108 +1,75 @@
-from aiogram import Router, F, Bot
-from aiogram.filters import CommandStart
-from aiogram.types import Message, CallbackQuery
+from aiogram import Router, F
+from aiogram.types import CallbackQuery, Message
+from aiogram.fsm.context import FSMContext
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
-from datetime import datetime
+from app.keyboards.common import category_kb, user_panel
+from app.services.settings import get_setting, DEFAULT_RULES
+from app.services.users import upsert_user
 from app.db.session import SessionLocal
-from app.db.models import User, Match, Prediction
+from app.db.models import User, Suggestion, InviteLink
+from app.states import SuggestMatch
 from app.config import settings
-from app.keyboards import active_matches as active_kb, winner_keyboard, score_skip
-from app.services.core import upsert_user, active_matches, get_setting, update_trend
-from app.utils.text import valid_score
-
 router=Router()
-pending_scores: dict[int, tuple[int,str]] = {}
 
-@router.message(CommandStart())
-async def start(message: Message, bot: Bot):
-    import logging
-    logging.info('START received from user_id=%s chat_id=%s text=%s', message.from_user.id if message.from_user else None, message.chat.id, message.text)
-    await upsert_user(message.from_user)
-    payload = (message.text or '').split(maxsplit=1)[1] if message.text and len(message.text.split())>1 else ''
-    if payload.startswith('vote_'):
-        mid=int(payload.replace('vote_',''))
-        await open_match_by_id(message, mid)
-        return
-    if message.from_user.id in settings.admin_ids:
-        from app.keyboards import admin_panel
-        await message.answer('✅ Panel admin', reply_markup=admin_panel(message.from_user.id in settings.super_admin_ids))
-        return
+@router.callback_query(F.data=='user:rules')
+async def rules(c:CallbackQuery): await c.message.answer(await get_setting('rules_text', DEFAULT_RULES)); await c.answer()
+@router.callback_query(F.data=='user:share')
+async def share(c:CallbackQuery, bot):
     async with SessionLocal() as s:
-        u=await s.get(User,message.from_user.id)
-        if u:
-            u.started=True; u.welcome_seen=True
-            await s.commit()
-    welcome=await get_setting('welcome_text','Bienvenue dans le bot Pronostic Sport. Ici tu peux consulter les pronostics en cours, donner ton avis et participer aux classements du groupe.')
-    photo=await get_setting('welcome_photo','')
-    if photo:
-        await message.answer_photo(photo, caption=welcome)
-    else:
-        await message.answer(welcome)
-    matches=await active_matches()
-    await message.answer('Voici les pronostics en cours. Tu peux ouvrir un match et donner ton avis.', reply_markup=active_kb(matches))
-
-async def open_match_by_id(message: Message, mid:int):
+        link=(await s.execute(select(InviteLink).where(InviteLink.user_id==c.from_user.id))).scalar_one_or_none()
+        if not link:
+            invite=await bot.create_chat_invite_link(settings.GROUP_ID, name=f'user_{c.from_user.id}', creates_join_request=False)
+            link=InviteLink(user_id=c.from_user.id, link=invite.invite_link); s.add(link); await s.commit()
+    await c.message.answer(f'📢 Voici ton lien personnel :\n{link.link}')
+    await c.answer()
+@router.callback_query(F.data=='user:suggest')
+async def suggest(c:CallbackQuery,state:FSMContext): await state.set_state(SuggestMatch.category); await c.message.edit_text('Choisissez une catégorie :', reply_markup=category_kb('sugcat')); await c.answer()
+@router.callback_query(F.data.startswith('sugcat:'))
+async def sug_cat(c:CallbackQuery,state:FSMContext): await state.update_data(category=c.data.split(':',1)[1]); await state.set_state(SuggestMatch.title); await c.message.answer('Titre du match ?'); await c.answer()
+@router.message(SuggestMatch.title)
+async def sug_title(m:Message,state:FSMContext): await state.update_data(title=m.text); await state.set_state(SuggestMatch.date); await m.answer('Date si connue ? Sinon écris : inconnue')
+@router.message(SuggestMatch.date)
+async def sug_date(m:Message,state:FSMContext): await state.update_data(date=m.text); await state.set_state(SuggestMatch.photo); await m.answer('Image optionnelle : envoie une photo ou écris passer.')
+@router.message(SuggestMatch.photo)
+async def sug_photo(m:Message,state:FSMContext,bot):
+    d=await state.get_data(); photo=m.photo[-1].file_id if m.photo else None
     async with SessionLocal() as s:
-        m=await s.get(Match,mid)
-        if not m or m.status!='active' or m.vote_close_at<=datetime.utcnow():
-            await message.answer('⛔ Ce pronostic est fermé.'); return
-        existing=(await s.execute(select(Prediction).where(Prediction.match_id==mid,Prediction.user_id==message.from_user.id))).scalar_one_or_none()
-        if existing:
-            await message.answer('✅ Tu as déjà pronostiqué sur ce match.'); return
-        text=f"🏟 {m.title}\n\nQui va gagner d’après vous ?"
-        if m.photo_file_id: await message.answer_photo(m.photo_file_id, caption=text, reply_markup=winner_keyboard(m))
-        else: await message.answer(text, reply_markup=winner_keyboard(m))
-
-@router.callback_query(F.data.startswith('openmatch:'))
-async def openmatch(cb: CallbackQuery):
-    mid=int(cb.data.split(':')[1])
-    await open_match_by_id(cb.message, mid)
-    await cb.answer()
-
-@router.callback_query(F.data.startswith('pick:'))
-async def pick(cb: CallbackQuery):
-    _, mid, winner = cb.data.split(':')
-    mid=int(mid)
+        sug=Suggestion(user_id=m.from_user.id, category=d['category'], title=d['title'], proposed_date=d['date'], photo_file_id=photo); s.add(sug); await s.commit(); await s.refresh(sug)
+    await state.clear(); await m.answer('✅ Suggestion envoyée à la modération.', reply_markup=user_panel())
+    from app.db.models import Role
     async with SessionLocal() as s:
-        m=await s.get(Match,mid)
-        if not m or m.status!='active' or m.vote_close_at<=datetime.utcnow():
-            await cb.answer('Pronostic fermé', show_alert=True); return
-        existing=(await s.execute(select(Prediction).where(Prediction.match_id==mid,Prediction.user_id==cb.from_user.id))).scalar_one_or_none()
-        if existing:
-            await cb.answer('Déjà voté', show_alert=True); return
-    pending_scores[cb.from_user.id]=(mid,winner)
-    await cb.message.answer('🎯 Prédire le score exact ?\nFormat : 2-1', reply_markup=score_skip(mid))
-    await cb.answer()
-
-@router.callback_query(F.data.startswith('score_skip:'))
-async def skip_score(cb: CallbackQuery, bot: Bot):
-    mid=int(cb.data.split(':')[1])
-    if cb.from_user.id not in pending_scores:
-        await cb.answer('Session expirée', show_alert=True); return
-    _, winner=pending_scores.pop(cb.from_user.id)
-    await save_prediction(cb.from_user.id, mid, winner, None, bot)
-    await cb.message.answer('✅ Pronostic enregistré.')
-    await cb.answer()
-
-@router.message(lambda m: m.chat.type == 'private' and m.from_user and m.from_user.id in pending_scores)
-async def private_text(message: Message, bot: Bot):
-    if valid_score(message.text or ''):
-        mid,winner=pending_scores.pop(message.from_user.id)
-        await save_prediction(message.from_user.id, mid, winner, message.text.strip().replace(':','-'), bot)
-        await message.answer('✅ Pronostic enregistré.')
-    else:
-        await message.answer('Format invalide. Envoie un score comme 2-1 ou clique sur Je ne sais pas.')
-
-async def save_prediction(user_id:int, mid:int, winner:str, score:str|None, bot:Bot):
+        ids=(await s.execute(select(Role.user_id).where(Role.role.in_(['admin','super_admin'])))).scalars().all()
+    for uid in set(ids):
+        try: await bot.send_message(uid,f'💡 Nouvelle suggestion #{sug.id}\nCatégorie: {sug.category}\nMatch: {sug.title}\nDate: {sug.proposed_date}')
+        except Exception: pass
+@router.callback_query(F.data=='user:leaderboard')
+async def leaderboard(c:CallbackQuery):
     async with SessionLocal() as s:
-        u=await s.get(User,user_id)
-        if not u:
-            u=User(id=user_id); s.add(u)
-        p=Prediction(match_id=mid,user_id=user_id,winner=winner,score=score)
-        s.add(p)
-        try:
-            await s.commit()
-        except IntegrityError:
-            await s.rollback(); return
-    await update_trend(bot, mid)
+        users=(await s.execute(select(User).where(User.total_predictions>=10).order_by((User.good_predictions*1.0/User.total_predictions).desc(), User.total_predictions.desc()).limit(10))).scalars().all()
+    lines=['🏆 TOP PRONOSTIQUEURS\n']
+    for i,u in enumerate(users,1):
+        pct=round(u.good_predictions*100/u.total_predictions) if u.total_predictions else 0
+        name=u.first_name or u.username or 'Membre'
+        from app.utils.text import anonymize
+        lines.append(f'{i}. {anonymize(name)} — {pct}% | {u.total_predictions} participations | 🎯 {u.exact_scores}')
+    await c.message.answer('\n'.join(lines) if len(lines)>1 else 'Pas encore assez de participations.'); await c.answer()
+@router.callback_query(F.data=='user:stats')
+async def my_stats(c:CallbackQuery):
+    async with SessionLocal() as s: u=await s.get(User,c.from_user.id)
+    pct=round(u.good_predictions*100/u.total_predictions) if u and u.total_predictions else 0
+    await c.message.answer(f'📈 Tes stats\n\nRéussite : {pct}%\nParticipations : {u.total_predictions if u else 0}\nScores exacts : {u.exact_scores if u else 0}\nInvitations : {u.invite_count if u else 0}'); await c.answer()
+@router.callback_query(F.data=='user:badges')
+async def badges(c:CallbackQuery):
+    async with SessionLocal() as s: u=await s.get(User,c.from_user.id)
+    b=[]
+    if u:
+        pct=(u.good_predictions/u.total_predictions) if u.total_predictions else 0
+        if u.total_predictions>=25: b.append('💬 Actif')
+        if u.total_predictions>=100: b.append('📈 Régulier')
+        if u.total_predictions>=500: b.append('🚀 Vétéran')
+        if u.exact_scores>=10: b.append('🎯 Tireur d’élite')
+        if u.current_streak>=10: b.append('🔥 En feu')
+        if u.current_streak>=20: b.append('⚡ Série légendaire')
+        if pct>=0.75 and u.total_predictions>=100: b.append('🏆 Expert Sport')
+        if pct>=0.80 and u.total_predictions>=250: b.append('👑 Légende')
+    await c.message.answer('🎖 Tes badges\n\n' + ('\n'.join(b) if b else 'Aucun badge pour le moment.')); await c.answer()

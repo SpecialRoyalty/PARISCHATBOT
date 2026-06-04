@@ -1,125 +1,78 @@
-from aiogram import Router, F, Bot
-from aiogram.types import Message, ChatMemberUpdated
-from aiogram.filters import Command
-from datetime import datetime, timedelta
-from sqlalchemy import select
+from aiogram import Router, F
+from aiogram.types import Message, ChatMemberUpdated, ChatPermissions
 from app.config import settings
-from app.db.session import SessionLocal
-from app.db.models import ForbiddenWord, Sanction, MediaHash, User, InviteLink
-from app.utils.text import has_link
-from app.services.core import upsert_user, log
-import hashlib
-from io import BytesIO
-
+from app.services.moderation import LINK_RE, has_forbidden, log, hash_message_media, media_is_banned, add_media_hash
+from app.services.roles import is_trusted
+from app.services.users import upsert_user
+from datetime import timedelta
 router=Router()
 
-async def safe_delete(message: Message):
-    try: await message.delete()
+@router.message(F.chat.id==settings.GROUP_ID, F.new_chat_members)
+async def join_msg(m:Message):
+    try: await m.delete()
     except Exception: pass
-
-async def media_hash_from_message(message: Message, bot: Bot) -> tuple[str,str] | None:
-    file_id=None; mtype=None
-    if message.photo:
-        file_id=message.photo[-1].file_id; mtype='photo'
-    elif message.video:
-        file_id=message.video.file_id; mtype='video'
-    elif message.document:
-        file_id=message.document.file_id; mtype='document'
-    if not file_id: return None
-    f=await bot.get_file(file_id)
-    bio=BytesIO(); await bot.download_file(f.file_path, bio)
-    data=bio.getvalue()
-    if mtype=='video': data=data[:1024*1024]
-    return hashlib.sha256(data).hexdigest(), mtype
-
-async def sanction(bot:Bot, chat_id:int, user_id:int, kind:str):
-    until=None
-    async with SessionLocal() as s:
-        obj=(await s.execute(select(Sanction).where(Sanction.user_id==user_id,Sanction.kind==kind))).scalar_one_or_none()
-        if not obj:
-            obj=Sanction(user_id=user_id,kind=kind,count=1); s.add(obj)
-        else: obj.count+=1
-        c=obj.count; await s.commit()
-    if kind=='forbidden_word':
-        if c==1: until=datetime.utcnow()+timedelta(days=1)
-        elif c==2: until=datetime.utcnow()+timedelta(days=3)
-        else:
-            await bot.ban_chat_member(chat_id,user_id); return
-        await bot.restrict_chat_member(chat_id,user_id, permissions={'can_send_messages':False}, until_date=until)
-    elif kind=='command':
-        if c==1: await bot.restrict_chat_member(chat_id,user_id, permissions={'can_send_messages':False}, until_date=datetime.utcnow()+timedelta(days=10))
-        else: await bot.ban_chat_member(chat_id,user_id)
-
-@router.message(F.chat.id != settings.GROUP_ID, F.chat.type.in_({'group','supergroup'}))
-async def wrong_group(message: Message, bot: Bot):
-    for aid in settings.admin_ids:
-        try: await bot.send_message(aid, f'🚨 Bot ajouté dans un groupe non autorisé : {message.chat.id} par {message.from_user.id if message.from_user else "inconnu"}')
-        except Exception: pass
-    try: await bot.leave_chat(message.chat.id)
+    for u in m.new_chat_members: await upsert_user(u)
+@router.message(F.chat.id==settings.GROUP_ID, F.left_chat_member)
+async def left_msg(m:Message):
+    try: await m.delete()
     except Exception: pass
-
-@router.message(F.new_chat_members | F.left_chat_member)
-async def service_join_leave(message: Message):
-    # suppression ciblée uniquement du message système Telegram
-    await safe_delete(message)
-    # comptage invitations uniques quand Telegram fournit l'invite_link
-    if message.new_chat_members and getattr(message, 'invite_link', None):
-        async with SessionLocal() as s:
-            link_obj=(await s.execute(select(InviteLink).where(InviteLink.link==message.invite_link.invite_link))).scalar_one_or_none()
-            if link_obj:
-                inviter=await s.get(User, link_obj.user_id)
-                if inviter:
-                    inviter.invites += len(message.new_chat_members)
-                    await s.commit()
-
-@router.message(F.chat.id == settings.GROUP_ID, F.from_user)
-async def moderate(message: Message, bot: Bot):
-    if message.from_user.id in settings.admin_ids or message.from_user.id in settings.trusted_ids:
-        await upsert_user(message.from_user); return
-    await upsert_user(message.from_user)
-    text=message.text or message.caption or ''
-    if has_link(text):
-        await safe_delete(message)
-        try: await bot.ban_chat_member(message.chat.id,message.from_user.id)
+@router.my_chat_member()
+async def my_chat_member(upd:ChatMemberUpdated, bot):
+    if upd.chat.type in {'group','supergroup'} and upd.chat.id!=settings.GROUP_ID:
+        await log('BOT_ADDED_UNAUTHORIZED', upd.from_user.id, str(upd.chat.id))
+        try: await bot.leave_chat(upd.chat.id)
         except Exception: pass
-        await log('link_ban', text[:500], message.from_user.id); return
-    if text.startswith('/'):
-        await safe_delete(message); await sanction(bot,message.chat.id,message.from_user.id,'command'); return
-    mh=await media_hash_from_message(message, bot)
-    if mh:
-        h,t=mh
-        async with SessionLocal() as s:
-            blocked=await s.get(MediaHash,h)
-        if blocked:
-            await safe_delete(message)
-            try: await bot.ban_chat_member(message.chat.id,message.from_user.id)
+
+@router.message(F.chat.id==settings.GROUP_ID)
+async def group_guard(m:Message, bot):
+    if m.from_user: await upsert_user(m.from_user)
+    # service messages only
+    if m.new_chat_members or m.left_chat_member: return
+    text=m.text or m.caption or ''
+    # trusted commands
+    if text.startswith('/supprime') and await is_trusted(m.from_user.id):
+        if m.reply_to_message:
+            try: await m.reply_to_message.delete()
             except Exception: pass
-            await log('media_hash_ban', t, message.from_user.id)
-            return
-    async with SessionLocal() as s:
-        words=[w.word.lower() for w in (await s.execute(select(ForbiddenWord))).scalars().all()]
-    if any(w and w in text.lower() for w in words):
-        await safe_delete(message); await sanction(bot,message.chat.id,message.from_user.id,'forbidden_word'); return
-
-@router.message(Command('supprime'))
-async def cmd_delete(message: Message):
-    if message.from_user.id not in settings.trusted_ids and message.from_user.id not in settings.admin_ids: return
-    if message.reply_to_message: await safe_delete(message.reply_to_message)
-    await safe_delete(message)
-
-@router.message(Command('ban'))
-async def cmd_ban(message: Message, bot: Bot):
-    if message.from_user.id not in settings.trusted_ids and message.from_user.id not in settings.admin_ids: return
-    if message.reply_to_message:
-        mh=await media_hash_from_message(message.reply_to_message, bot)
-        if mh:
-            h,t=mh
-            async with SessionLocal() as s:
-                existing=await s.get(MediaHash,h)
-                if not existing:
-                    s.add(MediaHash(hash=h, media_type=t, added_by=message.from_user.id))
-                    await s.commit()
-        if message.reply_to_message.from_user:
-            await bot.ban_chat_member(message.chat.id,message.reply_to_message.from_user.id)
-        await safe_delete(message.reply_to_message)
-    await safe_delete(message)
+        try: await m.delete()
+        except Exception: pass
+        return
+    if text.startswith('/ban') and await is_trusted(m.from_user.id):
+        if m.reply_to_message and m.reply_to_message.from_user:
+            h,t=await hash_message_media(bot,m.reply_to_message)
+            if h: await add_media_hash(h,t,m.from_user.id)
+            try: await bot.ban_chat_member(settings.GROUP_ID,m.reply_to_message.from_user.id)
+            except Exception: pass
+            try: await m.reply_to_message.delete()
+            except Exception: pass
+        try: await m.delete()
+        except Exception: pass
+        return
+    # links
+    if LINK_RE.search(text):
+        try: await m.delete()
+        except Exception: pass
+        try: await bot.ban_chat_member(settings.GROUP_ID,m.from_user.id)
+        except Exception: pass
+        await log('LINK_BAN',m.from_user.id,text[:200]); return
+    # commands
+    if text.startswith('/'):
+        try: await m.delete()
+        except Exception: pass
+        try: await bot.restrict_chat_member(settings.GROUP_ID,m.from_user.id,permissions=ChatPermissions(can_send_messages=False))
+        except Exception: pass
+        await log('COMMAND_MUTE',m.from_user.id,text[:100]); return
+    # forbidden words
+    w=await has_forbidden(text)
+    if w:
+        try: await m.delete()
+        except Exception: pass
+        await log('FORBIDDEN_WORD',m.from_user.id,w); return
+    # media hash
+    h,t=await hash_message_media(bot,m)
+    if h and await media_is_banned(h):
+        try: await m.delete()
+        except Exception: pass
+        try: await bot.ban_chat_member(settings.GROUP_ID,m.from_user.id)
+        except Exception: pass
+        await log('MEDIA_HASH_BAN',m.from_user.id,h); return
