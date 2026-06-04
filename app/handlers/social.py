@@ -24,7 +24,7 @@ async def sug_start(cb:CallbackQuery):
     await cb.message.answer('Catégorie ? Foot / Basket / Tennis / Boxe / Autre')
     await cb.answer()
 
-@router.message(F.chat.type=='private')
+@router.message(lambda m: m.chat.type == 'private' and m.from_user and m.from_user.id in sugg_state)
 async def sug_text(message:Message, bot:Bot):
     st=sugg_state.get(message.from_user.id)
     if not st: return

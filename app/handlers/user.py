@@ -16,6 +16,8 @@ pending_scores: dict[int, tuple[int,str]] = {}
 
 @router.message(CommandStart())
 async def start(message: Message, bot: Bot):
+    import logging
+    logging.info('START received from user_id=%s chat_id=%s text=%s', message.from_user.id if message.from_user else None, message.chat.id, message.text)
     await upsert_user(message.from_user)
     payload = (message.text or '').split(maxsplit=1)[1] if message.text and len(message.text.split())>1 else ''
     if payload.startswith('vote_'):
@@ -81,12 +83,14 @@ async def skip_score(cb: CallbackQuery, bot: Bot):
     await cb.message.answer('✅ Pronostic enregistré.')
     await cb.answer()
 
-@router.message(F.chat.type=='private')
+@router.message(lambda m: m.chat.type == 'private' and m.from_user and m.from_user.id in pending_scores)
 async def private_text(message: Message, bot: Bot):
-    if message.from_user.id in pending_scores and valid_score(message.text or ''):
+    if valid_score(message.text or ''):
         mid,winner=pending_scores.pop(message.from_user.id)
         await save_prediction(message.from_user.id, mid, winner, message.text.strip().replace(':','-'), bot)
         await message.answer('✅ Pronostic enregistré.')
+    else:
+        await message.answer('Format invalide. Envoie un score comme 2-1 ou clique sur Je ne sais pas.')
 
 async def save_prediction(user_id:int, mid:int, winner:str, score:str|None, bot:Bot):
     async with SessionLocal() as s:

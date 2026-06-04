@@ -22,7 +22,7 @@ async def create(cb:CallbackQuery):
     await cb.message.answer('Catégorie ? Foot / Basket / Tennis / Boxe / Autre')
     await cb.answer()
 
-@router.message(F.chat.type=='private')
+@router.message(lambda m: m.chat.type == 'private' and m.from_user and m.from_user.id in admin_state)
 async def admin_text(message:Message, bot:Bot):
     st=admin_state.get(message.from_user.id)
     if not st or not is_admin(message.from_user.id): return
@@ -105,7 +105,7 @@ async def result_pick(cb:CallbackQuery):
     await cb.message.answer('Score exact final ? Exemple : 2-1')
     await cb.answer()
 
-@router.message(F.chat.type=='private')
+@router.message(lambda m: m.chat.type == 'private' and m.from_user and m.from_user.id in admin_state and admin_state.get(m.from_user.id, {}).get('flow') == 'result_score')
 async def result_score(message:Message, bot:Bot):
     st=admin_state.get(message.from_user.id)
     if not st or st.get('flow')!='result_score': return
