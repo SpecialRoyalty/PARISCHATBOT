@@ -1,57 +1,40 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-
-def kb(rows):
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t, callback_data=d) for t,d in row] for row in rows])
-
-
-def admin_panel(is_super: bool):
-    rows = [
-        [('➕ Créer pronostic','admin:create_match'), ('📋 Matchs en cours','admin:active_matches')],
-        [('✅ Matchs clôturés','admin:closed_matches'), ('📊 Statistiques','admin:stats')],
-        [('🚫 Mots interdits','admin:words'), ('📌 Règles','admin:rules')],
-        [('🔒 Fermer groupe','admin:close_group'), ('🔓 Ouvrir groupe','admin:open_group')],
-        [('🖼 Médias interdits','admin:media_hashes'), ('📊 Info','admin:info')],
-    ]
+def admin_panel(is_super=False):
+    rows=[[InlineKeyboardButton(text='🏟 Créer pronostic', callback_data='admin:create')],
+          [InlineKeyboardButton(text='📊 Matchs actifs', callback_data='admin:active'), InlineKeyboardButton(text='✅ Matchs clôturés', callback_data='admin:closed')],
+          [InlineKeyboardButton(text='📌 Règles', callback_data='admin:rules'), InlineKeyboardButton(text='🚫 Mots interdits', callback_data='admin:words')],
+          [InlineKeyboardButton(text='🔒 Fermer groupe', callback_data='admin:close_group'), InlineKeyboardButton(text='🔓 Ouvrir groupe', callback_data='admin:open_group')],
+          [InlineKeyboardButton(text='ℹ️ Info', callback_data='admin:info')]]
     if is_super:
-        rows += [
-            [('👑 Ajouter Admin','super:add_admin'), ('🗑 Retirer Admin','super:remove_admin')],
-            [('🛡 Ajouter Trusted','super:add_trusted'), ('🧹 Retirer Trusted','super:remove_trusted')],
-            [('📜 Logs sécurité','super:logs'), ('⚙️ Paramètres','super:settings')],
-            [('👋 Config message /start','super:welcome')],
-        ]
-    return kb(rows)
+        rows += [[InlineKeyboardButton(text='👑 Admins/Trusted', callback_data='admin:roles')],
+                 [InlineKeyboardButton(text='👋 Config /start', callback_data='admin:startcfg')],
+                 [InlineKeyboardButton(text='🧾 Logs', callback_data='admin:logs')]]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
+def match_vote_group(bot_username: str, match_id: int):
+    url=f'https://t.me/{bot_username}?start=vote_{match_id}' if bot_username else None
+    btn=InlineKeyboardButton(text='Je pronostique', url=url) if url else InlineKeyboardButton(text='Je pronostique', callback_data=f'vote:{match_id}')
+    return InlineKeyboardMarkup(inline_keyboard=[[btn]])
 
-def category_kb(prefix='cat'):
-    return kb([[('⚽ Foot',f'{prefix}:Foot'),('🏀 Basket',f'{prefix}:Basket')],[('🎾 Tennis',f'{prefix}:Tennis'),('🥊 Boxe',f'{prefix}:Boxe')],[('➕ Autre',f'{prefix}:Autre')]])
+def active_matches(matches):
+    rows=[[InlineKeyboardButton(text=m.title, callback_data=f'openmatch:{m.id}')] for m in matches]
+    return InlineKeyboardMarkup(inline_keyboard=rows or [[InlineKeyboardButton(text='Aucun pronostic actif', callback_data='noop')]])
 
+def winner_keyboard(match):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=match.option_a, callback_data=f'pick:{match.id}:a')],
+        [InlineKeyboardButton(text=match.option_b, callback_data=f'pick:{match.id}:b')],
+        [InlineKeyboardButton(text='🤝 Match nul', callback_data=f'pick:{match.id}:draw')],
+    ])
 
-def match_vote_kb(match_id:int, bot_username: str | None = None):
-    # Dans le groupe, on utilise un bouton URL deep-link.
-    # Telegram ne permet pas d'envoyer un message privé à un utilisateur qui n'a jamais démarré le bot.
-    # Le lien ouvre directement la conversation privée avec le bon match.
-    if bot_username:
-        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Je pronostique', url=f'https://t.me/{bot_username}?start=vote_{match_id}')]])
-    return kb([[('Je pronostique', f'vote:start:{match_id}')]])
+def score_skip(match_id:int):
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Je ne sais pas', callback_data=f'score_skip:{match_id}')]])
 
-
-def choice_kb(match_id:int, side_a:str, side_b:str):
-    return kb([[ (side_a[:40], f'vote:choice:{match_id}:A') ],[(side_b[:40], f'vote:choice:{match_id}:B')],[('🤝 Match nul', f'vote:choice:{match_id}:DRAW')]])
-
-
-def score_skip_kb(match_id:int):
-    return kb([[('Je ne sais pas', f'vote:score_skip:{match_id}')]])
-
-
-def active_matches_kb(matches):
-    rows = [[(m.title[:48], f'vote:start:{m.id}')] for m in matches]
-    return kb(rows or [[('Aucun pronostic en cours','noop')]])
-
-
-def close_match_kb(match_id:int, side_a:str, side_b:str):
-    return kb([[(side_a[:40], f'close:winner:{match_id}:A')],[(side_b[:40], f'close:winner:{match_id}:B')],[('🤝 Match nul', f'close:winner:{match_id}:DRAW')],[('🚫 Annulé', f'close:winner:{match_id}:CANCEL')]])
-
-
-def suggestion_admin_kb(suggestion_id:int):
-    return kb([[('✅ Accepter', f'sugg:accept:{suggestion_id}'),('❌ Refuser', f'sugg:refuse:{suggestion_id}')],[('❓ Demander précision', f'sugg:clarify:{suggestion_id}')]])
+def close_result(match):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=match.option_a, callback_data=f'result:{match.id}:a')],
+        [InlineKeyboardButton(text=match.option_b, callback_data=f'result:{match.id}:b')],
+        [InlineKeyboardButton(text='🤝 Match nul', callback_data=f'result:{match.id}:draw')],
+        [InlineKeyboardButton(text='🚫 Annulé', callback_data=f'result:{match.id}:cancel')],
+    ])
