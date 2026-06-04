@@ -57,3 +57,10 @@ Alembic est inclus. Par défaut, le bot peut créer les tables automatiquement a
 
 ## Correctif Railway PostgreSQL
 Cette version convertit automatiquement `DATABASE_URL=postgresql://...` ou `postgres://...` en `postgresql+asyncpg://...` pour éviter l'erreur `ModuleNotFoundError: No module named psycopg2` avec SQLAlchemy async.
+
+## Correctif v6
+
+- Les IDs admin/super admin/trusted acceptent maintenant les guillemets Railway, exemple `SUPER_ADMIN_IDS="5296696302"`.
+- `/start` reconnaît les Super Admins/Admins et affiche directement le panel.
+- Les nouveaux utilisateurs non-admin reçoivent au premier `/start` un message d'accueil configurable + photo configurable, puis la liste des pronostics en cours.
+- Configuration du message/photo d'accueil : Panel Super Admin > 👋 Config message /start.
