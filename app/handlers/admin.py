@@ -10,6 +10,7 @@ from app.services.moderation import add_word, list_words, delete_word
 from app.services.roles import is_admin
 from app.handlers.votes import refresh_group_match
 from app.config import settings
+from app.db.session import SessionLocal
 router=Router()
 
 async def guard_admin(c:CallbackQuery):
@@ -109,3 +110,89 @@ async def close_group(c:CallbackQuery, bot):
 async def open_group(c:CallbackQuery, bot):
     from aiogram.types import ChatPermissions
     await bot.set_chat_permissions(settings.GROUP_ID, ChatPermissions(can_send_messages=True,can_send_photos=True,can_send_videos=True,can_send_documents=True)); await c.answer('Groupe ouvert', show_alert=True)
+
+@router.callback_query(F.data=='admin:stats')
+async def admin_stats(c:CallbackQuery):
+    if not await guard_admin(c): return
+    from sqlalchemy import select, func
+    from app.db.models import Match, Prediction, User, Suggestion, ForbiddenWord
+    async with SessionLocal() as s:
+        matches=(await s.execute(select(func.count(Match.id)))).scalar() or 0
+        active=(await s.execute(select(func.count(Match.id)).where(Match.status=='active'))).scalar() or 0
+        locked=(await s.execute(select(func.count(Match.id)).where(Match.status=='locked'))).scalar() or 0
+        closed=(await s.execute(select(func.count(Match.id)).where(Match.status=='closed'))).scalar() or 0
+        preds=(await s.execute(select(func.count(Prediction.id)))).scalar() or 0
+        users=(await s.execute(select(func.count(User.id)))).scalar() or 0
+        sugg=(await s.execute(select(func.count(Suggestion.id)).where(Suggestion.status=='pending'))).scalar() or 0
+        words=(await s.execute(select(func.count(ForbiddenWord.id)))).scalar() or 0
+    await c.message.answer(f"📊 Statistiques globales\n\nUtilisateurs PV : {users}\nMatchs total : {matches}\nActifs : {active}\nVerrouillés : {locked}\nClôturés : {closed}\nPronostics enregistrés : {preds}\nSuggestions en attente : {sugg}\nMots interdits : {words}")
+    await c.answer()
+
+@router.callback_query(F.data=='admin:trusted_requests')
+async def admin_trusted_requests(c:CallbackQuery):
+    if not await guard_admin(c): return
+    rows=[]; text='📨 Demandes Trusted\n\n'
+    for m in await pending_matches():
+        text+=f"#{m.id} {m.title}\nCatégorie: {m.category}\nDébut: {m.start_at}\nFin: {m.end_at}\nProposé par: {m.proposed_by}\n\n"
+        rows.append([(f'✅ Valider #{m.id}', f'admin:approve_pending:{m.id}'),(f'❌ Refuser #{m.id}', f'admin:reject_pending:{m.id}')])
+    if not rows: text+='Aucune demande en attente.'
+    rows.append([('⬅ Retour','nav:admin')])
+    await c.message.answer(text, reply_markup=kb(rows)); await c.answer()
+
+@router.callback_query(F.data.startswith('admin:approve_pending:'))
+async def approve_pending(c:CallbackQuery, bot):
+    if not await guard_admin(c): return
+    mid=int(c.data.split(':')[-1])
+    from app.db.models import Match
+    async with SessionLocal() as s:
+        m=await s.get(Match, mid)
+        if not m or m.status!='pending': await c.answer('Demande introuvable.', show_alert=True); return
+        m.status='active'; m.created_by=c.from_user.id
+        await s.commit()
+    await refresh_group_match(bot, mid)
+    await c.message.answer(f'✅ Demande #{mid} validée et publiée.'); await c.answer()
+
+@router.callback_query(F.data.startswith('admin:reject_pending:'))
+async def reject_pending(c:CallbackQuery):
+    if not await guard_admin(c): return
+    mid=int(c.data.split(':')[-1])
+    from app.db.models import Match
+    async with SessionLocal() as s:
+        m=await s.get(Match, mid)
+        if m and m.status=='pending': m.status='cancelled'; await s.commit()
+    await c.message.answer(f'❌ Demande #{mid} refusée.'); await c.answer()
+
+@router.callback_query(F.data=='admin:suggestions')
+async def admin_suggestions(c:CallbackQuery):
+    if not await guard_admin(c): return
+    from sqlalchemy import select
+    from app.db.models import Suggestion
+    async with SessionLocal() as s:
+        sugs=(await s.execute(select(Suggestion).where(Suggestion.status=='pending').order_by(Suggestion.id.desc()).limit(20))).scalars().all()
+    rows=[]; text='💡 Suggestions utilisateurs\n\n'
+    for sug in sugs:
+        text+=f"#{sug.id} {sug.title}\nCatégorie: {sug.category}\nDate: {sug.proposed_date}\nUtilisateur: {sug.user_id}\n\n"
+        rows.append([(f'✅ Accepter #{sug.id}', f'admin:accept_sug:{sug.id}'),(f'❌ Refuser #{sug.id}', f'admin:reject_sug:{sug.id}')])
+    if not sugs: text+='Aucune suggestion en attente.'
+    rows.append([('⬅ Retour','nav:admin')])
+    await c.message.answer(text, reply_markup=kb(rows)); await c.answer()
+
+@router.callback_query(F.data.startswith('admin:accept_sug:'))
+async def accept_sug(c:CallbackQuery):
+    if not await guard_admin(c): return
+    sid=int(c.data.split(':')[-1])
+    from app.db.models import Suggestion
+    async with SessionLocal() as s:
+        sug=await s.get(Suggestion,sid)
+        if sug: sug.status='accepted'; await s.commit()
+    await c.message.answer(f'✅ Suggestion #{sid} acceptée. Crée le match depuis “Créer match” si tu veux la publier.'); await c.answer()
+
+@router.callback_query(F.data.startswith('admin:reject_sug:'))
+async def reject_sug(c:CallbackQuery):
+    if not await guard_admin(c): return
+    sid=int(c.data.split(':')[-1])
+    from app.db.models import Suggestion
+    async with SessionLocal() as s:
+        sug=await s.get(Suggestion,sid)
+        if sug: sug.status='rejected'; await s.commit()
+    await c.message.answer(f'❌ Suggestion #{sid} refusée.'); await c.answer()

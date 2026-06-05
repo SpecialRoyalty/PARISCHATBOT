@@ -42,9 +42,17 @@ async def bg(c:CallbackQuery,state:FSMContext): await state.update_data(target='
 @router.callback_query(F.data=='super:broadcast_private')
 async def bp(c:CallbackQuery,state:FSMContext): await state.update_data(target='private'); await state.set_state(Broadcast.text); await c.message.answer('Message à envoyer à tous les PV :'); await c.answer()
 @router.callback_query(F.data=='super:broadcast_category')
-async def bc(c:CallbackQuery,state:FSMContext): await state.set_state(Broadcast.category); await c.message.answer('Catégorie cible ? Foot/Basket/Tennis/Boxe/MMA/Autre'); await c.answer()
-@router.message(Broadcast.category)
-async def bc_cat(m:Message,state:FSMContext): await state.update_data(target='category',category=m.text.strip()); await state.set_state(Broadcast.text); await m.answer('Message à envoyer :')
+async def bc(c:CallbackQuery,state:FSMContext):
+    from app.keyboards.common import category_kb
+    await state.set_state(Broadcast.category)
+    await c.message.answer('Catégorie cible ?', reply_markup=category_kb('bcat'))
+    await c.answer()
+@router.callback_query(F.data.startswith('bcat:'))
+async def bc_cat_cb(c:CallbackQuery,state:FSMContext):
+    await state.update_data(target='category', category=c.data.split(':',1)[1])
+    await state.set_state(Broadcast.text)
+    await c.message.answer('Message à envoyer :')
+    await c.answer()
 @router.message(Broadcast.text)
 async def b_send(m:Message,state:FSMContext,bot):
     d=await state.get_data(); sent=0
@@ -92,3 +100,35 @@ async def logs(c:CallbackQuery):
     async with SessionLocal() as s:
         logs=(await s.execute(select(SecurityLog).order_by(SecurityLog.id.desc()).limit(20))).scalars().all()
     await c.message.answer('\n'.join(f'#{l.id} {l.event} {l.user_id} {l.details or ""}' for l in logs) or 'Aucun log.'); await c.answer()
+
+@router.callback_query(F.data=='super:freq')
+async def freq(c:CallbackQuery):
+    if not await guard(c): return
+    try:
+        from app.services.scheduler import scheduler
+        jobs=scheduler.get_jobs()
+        lines=['⏱ Fréquences / prochaines publications\n']
+        for j in jobs:
+            lines.append(f'• {j.id} : prochain passage {j.next_run_time}')
+        if not jobs:
+            lines.append('Aucune tâche planifiée active.')
+    except Exception as e:
+        lines=['⏱ Fréquences','Impossible de lire le scheduler.',str(e)]
+    await c.message.answer('\n'.join(lines), reply_markup=super_panel())
+    await c.answer()
+
+@router.callback_query(F.data=='super:hash_del')
+async def hash_del_prompt(c:CallbackQuery,state:FSMContext):
+    if not await guard(c): return
+    await c.message.answer('Envoie : supprimer hash <id>')
+    await c.answer()
+
+@router.message(F.text.startswith('supprimer hash '))
+async def hash_del_msg(m:Message):
+    if not await is_super(m.from_user.id): return
+    try:
+        hid=int(m.text.split()[-1])
+        await delete_hash(hid)
+        await m.answer('✅ Hash supprimé si existant.')
+    except Exception:
+        await m.answer('Format invalide. Exemple : supprimer hash 12')

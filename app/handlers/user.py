@@ -4,33 +4,60 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy import select
 from app.keyboards.common import category_kb, user_panel
 from app.services.settings import get_setting, DEFAULT_RULES
-from app.services.users import upsert_user
 from app.db.session import SessionLocal
 from app.db.models import User, Suggestion, InviteLink
 from app.states import SuggestMatch
 from app.config import settings
 router=Router()
 
+async def send_invite_link(user_id:int, bot):
+    async with SessionLocal() as s:
+        link=(await s.execute(select(InviteLink).where(InviteLink.user_id==user_id))).scalar_one_or_none()
+        if not link:
+            invite=await bot.create_chat_invite_link(settings.GROUP_ID, name=f'user_{user_id}', creates_join_request=False)
+            link=InviteLink(user_id=user_id, link=invite.invite_link); s.add(link); await s.commit()
+        return link.link
+
+async def start_suggestion_private(target, state:FSMContext):
+    await state.set_state(SuggestMatch.category)
+    await target.answer('Choisissez une catégorie :', reply_markup=category_kb('sugcat'))
+
 @router.callback_query(F.data=='user:rules')
-async def rules(c:CallbackQuery): await c.message.answer(await get_setting('rules_text', DEFAULT_RULES)); await c.answer()
+async def rules(c:CallbackQuery):
+    await c.message.answer(await get_setting('rules_text', DEFAULT_RULES)); await c.answer()
+
 @router.callback_query(F.data=='user:share')
 async def share(c:CallbackQuery, bot):
-    async with SessionLocal() as s:
-        link=(await s.execute(select(InviteLink).where(InviteLink.user_id==c.from_user.id))).scalar_one_or_none()
-        if not link:
-            invite=await bot.create_chat_invite_link(settings.GROUP_ID, name=f'user_{c.from_user.id}', creates_join_request=False)
-            link=InviteLink(user_id=c.from_user.id, link=invite.invite_link); s.add(link); await s.commit()
-    await c.message.answer(f'📢 Voici ton lien personnel :\n{link.link}')
+    if c.message and c.message.chat.type != 'private':
+        me=await bot.get_me()
+        await c.answer(url=f'https://t.me/{me.username}?start=share')
+        return
+    link=await send_invite_link(c.from_user.id, bot)
+    await c.message.answer(f'📢 Voici ton lien personnel :\n{link}')
     await c.answer()
+
 @router.callback_query(F.data=='user:suggest')
-async def suggest(c:CallbackQuery,state:FSMContext): await state.set_state(SuggestMatch.category); await c.message.edit_text('Choisissez une catégorie :', reply_markup=category_kb('sugcat')); await c.answer()
-@router.callback_query(F.data.startswith('sugcat:'))
-async def sug_cat(c:CallbackQuery,state:FSMContext): await state.update_data(category=c.data.split(':',1)[1]); await state.set_state(SuggestMatch.title); await c.message.answer('Titre du match ?'); await c.answer()
-@router.message(SuggestMatch.title)
-async def sug_title(m:Message,state:FSMContext): await state.update_data(title=m.text); await state.set_state(SuggestMatch.date); await m.answer('Date si connue ? Sinon écris : inconnue')
-@router.message(SuggestMatch.date)
-async def sug_date(m:Message,state:FSMContext): await state.update_data(date=m.text); await state.set_state(SuggestMatch.photo); await m.answer('Image optionnelle : envoie une photo ou écris passer.')
-@router.message(SuggestMatch.photo)
+async def suggest(c:CallbackQuery,state:FSMContext, bot):
+    if c.message and c.message.chat.type != 'private':
+        me=await bot.get_me()
+        await c.answer(url=f'https://t.me/{me.username}?start=suggest')
+        return
+    await start_suggestion_private(c.message, state)
+    await c.answer()
+
+@router.callback_query(F.data.startswith('sugcat:'), F.message.chat.type=='private')
+async def sug_cat(c:CallbackQuery,state:FSMContext):
+    await state.update_data(category=c.data.split(':',1)[1]); await state.set_state(SuggestMatch.title); await c.message.answer('Titre du match ?'); await c.answer()
+
+@router.message(SuggestMatch.title, F.chat.type=='private')
+async def sug_title(m:Message,state:FSMContext):
+    await state.update_data(title=m.text); await state.set_state(SuggestMatch.date); await m.answer('Date si connue ? Sinon écris : inconnue')
+
+@router.message(SuggestMatch.date, F.chat.type=='private')
+async def sug_date(m:Message,state:FSMContext):
+    await state.update_data(date=m.text); await state.set_state(SuggestMatch.photo); await m.answer('Image optionnelle : envoie une photo ou écris passer.')
+
+@router.message(SuggestMatch.photo, F.chat.type=='private')
 async def sug_photo(m:Message,state:FSMContext,bot):
     d=await state.get_data(); photo=m.photo[-1].file_id if m.photo else None
     async with SessionLocal() as s:
@@ -42,6 +69,7 @@ async def sug_photo(m:Message,state:FSMContext,bot):
     for uid in set(ids):
         try: await bot.send_message(uid,f'💡 Nouvelle suggestion #{sug.id}\nCatégorie: {sug.category}\nMatch: {sug.title}\nDate: {sug.proposed_date}')
         except Exception: pass
+
 @router.callback_query(F.data=='user:leaderboard')
 async def leaderboard(c:CallbackQuery):
     async with SessionLocal() as s:
@@ -53,11 +81,13 @@ async def leaderboard(c:CallbackQuery):
         from app.utils.text import anonymize
         lines.append(f'{i}. {anonymize(name)} — {pct}% | {u.total_predictions} participations | 🎯 {u.exact_scores}')
     await c.message.answer('\n'.join(lines) if len(lines)>1 else 'Pas encore assez de participations.'); await c.answer()
+
 @router.callback_query(F.data=='user:stats')
 async def my_stats(c:CallbackQuery):
     async with SessionLocal() as s: u=await s.get(User,c.from_user.id)
     pct=round(u.good_predictions*100/u.total_predictions) if u and u.total_predictions else 0
     await c.message.answer(f'📈 Tes stats\n\nRéussite : {pct}%\nParticipations : {u.total_predictions if u else 0}\nScores exacts : {u.exact_scores if u else 0}\nInvitations : {u.invite_count if u else 0}'); await c.answer()
+
 @router.callback_query(F.data=='user:badges')
 async def badges(c:CallbackQuery):
     async with SessionLocal() as s: u=await s.get(User,c.from_user.id)
