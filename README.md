@@ -14,3 +14,7 @@ Le bot doit être admin du groupe avec droits : supprimer messages, bannir, gér
 
 ## Commande
 Railway lance `bash start.sh`.
+
+## Notes de correction panels
+Les callbacks principaux des panels User / Trusted / Admin / Super Admin sont routés.
+Pour les boutons utilisés depuis le groupe, les actions sensibles essaient d’envoyer la suite en privé.
