@@ -103,6 +103,16 @@ class Suggestion(Base):
     status: Mapped[str] = mapped_column(String(32), default='pending')
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+
+class Badge(Base):
+    __tablename__='badges'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    code: Mapped[str] = mapped_column(String(64))
+    label: Mapped[str] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    __table_args__=(UniqueConstraint('user_id','code',name='uix_badge_user_code'),)
+
 class UsernameHistory(Base):
     __tablename__='username_history'
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
