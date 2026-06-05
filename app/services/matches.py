@@ -5,6 +5,7 @@ from app.db.session import SessionLocal
 from app.db.models import Match, Prediction, User, SecurityLog
 from app.config import settings
 from app.utils.text import parse_title, anonymize
+from app.services.badges import award_badges_for_user
 
 def fmt_dt(dt): return dt.strftime('%d/%m/%Y à %H:%M') if dt else 'Non définie'
 
@@ -94,4 +95,8 @@ async def close_match(mid:int, winner:str, score:str|None):
                 if good: u.good_predictions += 1; u.current_streak += 1
                 else: u.current_streak = 0
                 if exact: u.exact_scores += 1
-        await s.commit(); return m
+        affected_user_ids=list({p.user_id for p in preds})
+        await s.commit()
+    for uid in affected_user_ids:
+        await award_badges_for_user(uid)
+    return m

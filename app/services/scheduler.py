@@ -1,4 +1,5 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from datetime import datetime, timedelta
 from sqlalchemy import select
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from app.config import settings
@@ -79,9 +80,13 @@ async def periodic(bot):
                 pass
 
 async def start_scheduler(bot):
-    scheduler.add_job(post_rules,'interval',hours=settings.RULES_HOURS,args=[bot],id='rules',replace_existing=True, next_run_time=None)
-    scheduler.add_job(post_share,'interval',hours=settings.SHARE_HOURS,args=[bot],id='share',replace_existing=True, next_run_time=None)
-    scheduler.add_job(post_suggest,'interval',hours=settings.SUGGESTION_HOURS,args=[bot],id='suggest',replace_existing=True, next_run_time=None)
-    scheduler.add_job(send_leaderboard,'interval',hours=settings.LEADERBOARD_HOURS,args=[bot],id='leaderboard',replace_existing=True)
-    scheduler.add_job(periodic,'interval',minutes=1,args=[bot],id='periodic',replace_existing=True)
-    scheduler.start()
+    now=datetime.now(settings.tz)
+    # Important: do NOT use next_run_time=None here. In APScheduler that pauses the job,
+    # which is why the Info panel showed rules/share/suggest = None.
+    scheduler.add_job(post_rules,'interval',hours=settings.RULES_HOURS,args=[bot],id='rules',replace_existing=True, next_run_time=now+timedelta(seconds=20))
+    scheduler.add_job(post_share,'interval',hours=settings.SHARE_HOURS,args=[bot],id='share',replace_existing=True, next_run_time=now+timedelta(seconds=40))
+    scheduler.add_job(post_suggest,'interval',hours=settings.SUGGESTION_HOURS,args=[bot],id='suggest',replace_existing=True, next_run_time=now+timedelta(seconds=60))
+    scheduler.add_job(send_leaderboard,'interval',hours=settings.LEADERBOARD_HOURS,args=[bot],id='leaderboard',replace_existing=True, next_run_time=now+timedelta(seconds=80))
+    scheduler.add_job(periodic,'interval',minutes=1,args=[bot],id='periodic',replace_existing=True, next_run_time=now+timedelta(seconds=10))
+    if not scheduler.running:
+        scheduler.start()

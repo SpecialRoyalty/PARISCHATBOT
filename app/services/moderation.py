@@ -11,52 +11,22 @@ async def log(event,user_id=None,details=None):
     async with SessionLocal() as s:
         s.add(SecurityLog(event=event,user_id=user_id,details=details)); await s.commit()
 async def add_word(word, uid=None):
-    # Retourne: "added", "exists" ou "empty".
-    # Important: la recherche est insensible à la casse.
-    # On utilise .first() au lieu de scalar_one_or_none() car certaines bases
-    # peuvent déjà contenir des doublons ajoutés manuellement.
-    clean = (word or '').strip()
-    if not clean:
+    cleaned=(word or '').strip().lower()
+    if not cleaned:
         return 'empty'
     async with SessionLocal() as s:
-        existing = (await s.execute(
-            select(ForbiddenWord)
-            .where(func.lower(ForbiddenWord.word) == clean.lower())
-            .order_by(ForbiddenWord.id.asc())
-        )).scalars().first()
+        existing=(await s.execute(select(ForbiddenWord).where(func.lower(ForbiddenWord.word)==cleaned).limit(1))).scalars().first()
         if existing:
             return 'exists'
-        s.add(ForbiddenWord(word=clean, added_by=uid))
-        await s.commit()
-        return 'added'
+        s.add(ForbiddenWord(word=cleaned, added_by=uid)); await s.commit(); return 'added'
 async def list_words():
     async with SessionLocal() as s:
         return (await s.execute(select(ForbiddenWord).order_by(ForbiddenWord.word))).scalars().all()
 async def delete_word(wid:int):
     async with SessionLocal() as s:
         x=await s.get(ForbiddenWord,wid)
-        if x:
-            await s.delete(x)
-            await s.commit()
-            return True
+        if x: await s.delete(x); await s.commit(); return True
         return False
-
-async def cleanup_forbidden_duplicates():
-    # Supprime les doublons insensibles à la casse en gardant le plus ancien ID.
-    async with SessionLocal() as s:
-        words=(await s.execute(select(ForbiddenWord).order_by(ForbiddenWord.id.asc()))).scalars().all()
-        seen=set()
-        changed=False
-        for w in words:
-            key=(w.word or '').strip().lower()
-            if not key:
-                await s.delete(w); changed=True; continue
-            if key in seen:
-                await s.delete(w); changed=True
-            else:
-                seen.add(key)
-        if changed:
-            await s.commit()
 async def has_forbidden(text:str):
     if not text: return None
     async with SessionLocal() as s:
@@ -90,3 +60,20 @@ async def hash_message_media(bot, msg:Message):
 async def media_is_banned(h):
     async with SessionLocal() as s:
         return bool((await s.execute(select(MediaHash).where(MediaHash.hash==h))).scalar_one_or_none())
+
+async def cleanup_duplicate_words():
+    async with SessionLocal() as s:
+        rows=(await s.execute(select(ForbiddenWord).order_by(ForbiddenWord.id))).scalars().all()
+        seen=set(); removed=0
+        for w in rows:
+            key=(w.word or '').strip().lower()
+            if not key:
+                await s.delete(w); removed+=1; continue
+            if key in seen:
+                await s.delete(w); removed+=1
+            else:
+                if w.word != key:
+                    w.word = key
+                seen.add(key)
+        await s.commit()
+        return removed
