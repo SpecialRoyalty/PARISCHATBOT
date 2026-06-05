@@ -11,9 +11,19 @@ async def log(event,user_id=None,details=None):
     async with SessionLocal() as s:
         s.add(SecurityLog(event=event,user_id=user_id,details=details)); await s.commit()
 async def add_word(word, uid=None):
+    # Retourne: "added", "exists" ou "empty".
+    clean = (word or '').strip()
+    if not clean:
+        return 'empty'
     async with SessionLocal() as s:
-        if not (await s.execute(select(ForbiddenWord).where(func.lower(ForbiddenWord.word)==word.lower()))).scalar_one_or_none():
-            s.add(ForbiddenWord(word=word.strip(), added_by=uid)); await s.commit()
+        existing = (await s.execute(
+            select(ForbiddenWord).where(func.lower(ForbiddenWord.word) == clean.lower())
+        )).scalar_one_or_none()
+        if existing:
+            return 'exists'
+        s.add(ForbiddenWord(word=clean, added_by=uid))
+        await s.commit()
+        return 'added'
 async def list_words():
     async with SessionLocal() as s:
         return (await s.execute(select(ForbiddenWord).order_by(ForbiddenWord.word))).scalars().all()
