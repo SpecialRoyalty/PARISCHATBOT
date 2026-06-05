@@ -12,13 +12,18 @@ async def log(event,user_id=None,details=None):
         s.add(SecurityLog(event=event,user_id=user_id,details=details)); await s.commit()
 async def add_word(word, uid=None):
     # Retourne: "added", "exists" ou "empty".
+    # Important: la recherche est insensible à la casse.
+    # On utilise .first() au lieu de scalar_one_or_none() car certaines bases
+    # peuvent déjà contenir des doublons ajoutés manuellement.
     clean = (word or '').strip()
     if not clean:
         return 'empty'
     async with SessionLocal() as s:
         existing = (await s.execute(
-            select(ForbiddenWord).where(func.lower(ForbiddenWord.word) == clean.lower())
-        )).scalar_one_or_none()
+            select(ForbiddenWord)
+            .where(func.lower(ForbiddenWord.word) == clean.lower())
+            .order_by(ForbiddenWord.id.asc())
+        )).scalars().first()
         if existing:
             return 'exists'
         s.add(ForbiddenWord(word=clean, added_by=uid))
@@ -30,8 +35,28 @@ async def list_words():
 async def delete_word(wid:int):
     async with SessionLocal() as s:
         x=await s.get(ForbiddenWord,wid)
-        if x: await s.delete(x); await s.commit(); return True
+        if x:
+            await s.delete(x)
+            await s.commit()
+            return True
         return False
+
+async def cleanup_forbidden_duplicates():
+    # Supprime les doublons insensibles à la casse en gardant le plus ancien ID.
+    async with SessionLocal() as s:
+        words=(await s.execute(select(ForbiddenWord).order_by(ForbiddenWord.id.asc()))).scalars().all()
+        seen=set()
+        changed=False
+        for w in words:
+            key=(w.word or '').strip().lower()
+            if not key:
+                await s.delete(w); changed=True; continue
+            if key in seen:
+                await s.delete(w); changed=True
+            else:
+                seen.add(key)
+        if changed:
+            await s.commit()
 async def has_forbidden(text:str):
     if not text: return None
     async with SessionLocal() as s:
