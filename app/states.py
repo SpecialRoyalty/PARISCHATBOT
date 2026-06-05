@@ -6,6 +6,7 @@ class TrustedMatch(StatesGroup):
 class SuggestMatch(StatesGroup):
     category=State(); title=State(); date=State(); photo=State()
 class AddWord(StatesGroup): word=State()
+class DeleteWord(StatesGroup): word_id=State()
 class SetRules(StatesGroup): text=State()
 class SetStartText(StatesGroup): text=State()
 class SetStartPhoto(StatesGroup): photo=State()
