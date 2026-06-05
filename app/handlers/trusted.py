@@ -51,3 +51,35 @@ async def tr_word(c:CallbackQuery,state:FSMContext):
     await state.set_state(AddWord.word); await c.message.answer('Mot ou expression à ajouter :'); await c.answer()
 @router.callback_query(F.data=='trusted:commands')
 async def tr_commands(c:CallbackQuery): await c.message.answer('Commandes disponibles :\n/supprime\n/ban'); await c.answer()
+
+@router.callback_query(F.data=='trusted:my_requests')
+async def trusted_my_requests(c:CallbackQuery):
+    if not await guard(c):
+        return
+    from sqlalchemy import select
+    from app.db.models import Match
+    from app.db.session import SessionLocal
+    async with SessionLocal() as s:
+        res = await s.execute(
+            select(Match)
+            .where(Match.proposed_by == c.from_user.id)
+            .order_by(Match.id.desc())
+            .limit(20)
+        )
+        matches = res.scalars().all()
+    if not matches:
+        await c.message.answer('📊 Mes propositions\n\nAucune proposition pour le moment.', reply_markup=trusted_panel())
+        await c.answer()
+        return
+    status_map = {
+        'pending': '🟡 En attente',
+        'active': '🟢 Validée / publiée',
+        'locked': '🔒 Votes fermés',
+        'closed': '✅ Clôturée',
+        'cancelled': '🔴 Refusée / annulée',
+    }
+    text = '📊 Mes propositions\n\n'
+    for m in matches:
+        text += f"#{m.id} {m.title}\nCatégorie : {m.category}\nStatut : {status_map.get(m.status, m.status)}\nDébut : {m.start_at}\nFin : {m.end_at or '—'}\n\n"
+    await c.message.answer(text, reply_markup=trusted_panel())
+    await c.answer()
