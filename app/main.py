@@ -5,10 +5,12 @@ from app.config import settings
 from app.db.session import init_db
 from app.handlers import start, user, votes, admin, trusted, super_admin, moderation
 from app.services.scheduler import start_scheduler
+from app.services.moderation import cleanup_duplicate_words
 
 async def main():
     logging.basicConfig(level=logging.INFO)
     await init_db()
+    await cleanup_duplicate_words()
     bot=Bot(settings.BOT_TOKEN)
     dp=Dispatcher(storage=MemoryStorage())
     # Specific/private routers before broad group moderation
