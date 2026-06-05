@@ -48,11 +48,7 @@ async def tr_end(m:Message,state:FSMContext,bot):
 @router.callback_query(F.data=='trusted:add_word')
 async def tr_word(c:CallbackQuery,state:FSMContext):
     if not await guard(c): return
-    await state.clear()
-    await state.update_data(word_source='trusted')
-    await state.set_state(AddWord.word)
-    await c.message.answer('Mot ou expression à ajouter :')
-    await c.answer()
+    await state.set_state(AddWord.word); await c.message.answer('Mot ou expression à ajouter :'); await c.answer()
 @router.callback_query(F.data=='trusted:commands')
 async def tr_commands(c:CallbackQuery): await c.message.answer('Commandes disponibles :\n/supprime\n/ban'); await c.answer()
 

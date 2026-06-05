@@ -11,6 +11,7 @@ from app.keyboards.common import super_panel, kb
 from app.config import settings
 from app.db.session import SessionLocal, engine
 from app.db.models import SecurityLog, User
+from app.services.badges import badge_health
 router=Router()
 async def guard(c):
     if not await is_super(c.from_user.id): await c.answer('Accès refusé', show_alert=True); return False
@@ -34,8 +35,27 @@ async def info(c:CallbackQuery):
     try:
         async with engine.begin() as conn: await conn.exec_driver_sql('SELECT 1')
         db='✅'
-    except Exception: db='❌'
-    await c.message.answer(f'📊 Info système\n\nBot : ✅\nPostgreSQL : {db}\nRailway : ✅\nSchedulers : ✅\nMessages : ✅\nVersion : {settings.BOT_VERSION}\n\nProchains messages : règles / partage / suggestions / classement selon planning APScheduler.')
+    except Exception:
+        db='❌'
+    try:
+        from app.services.scheduler import scheduler
+        jobs={j.id:j.next_run_time for j in scheduler.get_jobs()}
+        sched='✅' if all(jobs.get(x) is not None for x in ['periodic','leaderboard','rules','share','suggest']) else '⚠️'
+        schedule_lines='\n'.join(f'• {k} : {jobs.get(k)}' for k in ['periodic','leaderboard','rules','share','suggest'])
+    except Exception as e:
+        sched='❌'; schedule_lines=f'Impossible de lire les tâches : {e}'
+    try:
+        bh=await badge_health()
+        badge_text=(f"{bh['status']} — {bh['badges']} badges attribués\n"
+                    f"Éligibles participation: {bh['eligible_active']} | scores exacts: {bh['eligible_exact']} | invitations: {bh['eligible_invite']}")
+    except Exception as e:
+        badge_text=f'❌ Erreur vérification badges : {e}'
+    await c.message.answer(
+        f'📊 Info système\n\n'
+        f'Bot : ✅\nPostgreSQL : {db}\nRailway : ✅\nSchedulers : {sched}\nMessages : ✅\nVersion : {settings.BOT_VERSION}\n\n'
+        f'⏱ Prochaines publications\n{schedule_lines}\n\n'
+        f'🎖 Vérification badges\n{badge_text}'
+    )
     await c.answer()
 @router.callback_query(F.data=='super:broadcast_group')
 async def bg(c:CallbackQuery,state:FSMContext): await state.update_data(target='group'); await state.set_state(Broadcast.text); await c.message.answer('Message à envoyer au groupe :'); await c.answer()
@@ -106,12 +126,15 @@ async def freq(c:CallbackQuery):
     if not await guard(c): return
     try:
         from app.services.scheduler import scheduler
-        jobs=scheduler.get_jobs()
+        jobs={j.id:j for j in scheduler.get_jobs()}
         lines=['⏱ Fréquences / prochaines publications\n']
-        for j in jobs:
-            lines.append(f'• {j.id} : prochain passage {j.next_run_time}')
-        if not jobs:
-            lines.append('Aucune tâche planifiée active.')
+        labels={'periodic':'verrouillage matchs + clôtures','leaderboard':'classement','rules':'règles','share':'partage','suggest':'suggestion'}
+        for jid in ['periodic','leaderboard','rules','share','suggest']:
+            j=jobs.get(jid)
+            if j:
+                lines.append(f"• {jid} ({labels[jid]}) : prochain passage {j.next_run_time}")
+            else:
+                lines.append(f"• {jid} ({labels[jid]}) : ❌ non planifié")
     except Exception as e:
         lines=['⏱ Fréquences','Impossible de lire le scheduler.',str(e)]
     await c.message.answer('\n'.join(lines), reply_markup=super_panel())

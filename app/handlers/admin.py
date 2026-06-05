@@ -2,7 +2,7 @@ from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
 from app.keyboards.common import category_kb, admin_panel, kb
-from app.states import CreateMatch, SetRules, AddWord, DeleteWord, CloseMatch
+from app.states import CreateMatch, SetRules, AddWord, CloseMatch
 from app.utils.dates import parse_dt
 from app.services.matches import create_match, active_matches, closed_matches, match_stats, close_match, pending_matches, get_match
 from app.services.settings import set_setting, DEFAULT_RULES, get_setting
@@ -88,54 +88,21 @@ async def admin_closed(c:CallbackQuery):
 async def words_menu(c:CallbackQuery):
     await c.message.edit_text('🚫 Mots interdits', reply_markup=kb([[('➕ Ajouter','admin:word_add')],[('📋 Voir liste','admin:word_list')],[('❌ Supprimer','admin:word_del')],[('⬅ Retour','nav:admin')]])); await c.answer()
 @router.callback_query(F.data=='admin:word_add')
-async def word_add(c:CallbackQuery, state:FSMContext):
-    if not await guard_admin(c): return
-    await state.clear()
-    await state.update_data(word_source='admin')
-    await state.set_state(AddWord.word)
-    await c.message.answer('Mot ou expression à ajouter :')
-    await c.answer()
-
-@router.message(AddWord.word, F.chat.type == 'private')
+async def word_add(c:CallbackQuery, state:FSMContext): await state.set_state(AddWord.word); await c.message.answer('Mot ou expression à ajouter :'); await c.answer()
+@router.message(AddWord.word)
 async def word_add_msg(m:Message, state:FSMContext):
-    status = await add_word(m.text, m.from_user.id)
+    status=await add_word(m.text,m.from_user.id)
     await state.clear()
-    if status == 'empty':
-        await m.answer('❌ Mot vide. Recommence depuis le menu Mots interdits.')
-    elif status == 'exists':
-        await m.answer('ℹ️ Ce mot existe déjà dans la liste.')
-    else:
-        await m.answer(f'✅ Mot ajouté : {m.text.strip()}')
+    if status=='empty': await m.answer('Mot vide, rien ajouté.')
+    elif status=='exists': await m.answer('Ce mot existe déjà.')
+    else: await m.answer('✅ Mot ajouté.')
 @router.callback_query(F.data=='admin:word_list')
 async def word_list(c:CallbackQuery):
     words=await list_words(); await c.message.answer('Mots interdits:\n'+'\n'.join(f'#{w.id} {w.word}' for w in words) if words else 'Aucun mot.'); await c.answer()
 @router.callback_query(F.data=='admin:word_del')
-async def word_del_help(c:CallbackQuery, state:FSMContext):
-    if not await guard_admin(c): return
-    await state.clear()
-    await state.set_state(DeleteWord.word_id)
-    await c.message.answer('Envoie l’ID du mot à supprimer. Exemple : 104')
-    await c.answer()
-
-@router.message(DeleteWord.word_id, F.chat.type == 'private')
-async def word_del_state_msg(m:Message, state:FSMContext):
-    raw=(m.text or '').strip().replace('#','')
-    if not raw.isdigit():
-        await m.answer('❌ ID invalide. Envoie uniquement le numéro, exemple : 104')
-        return
-    ok=await delete_word(int(raw))
-    await state.clear()
-    await m.answer('✅ Mot supprimé.' if ok else 'ℹ️ Aucun mot trouvé avec cet ID.')
-
+async def word_del_help(c:CallbackQuery): await c.message.answer('Envoie : supprimer mot <id>'); await c.answer()
 @router.message(F.text.startswith('supprimer mot '))
-async def word_del_msg(m:Message):
-    # Compatibilité ancienne commande privée admin.
-    raw=m.text.split()[-1].replace('#','')
-    if not raw.isdigit():
-        await m.answer('❌ ID invalide. Exemple : supprimer mot 104')
-        return
-    ok=await delete_word(int(raw))
-    await m.answer('✅ Mot supprimé.' if ok else 'ℹ️ Aucun mot trouvé avec cet ID.')
+async def word_del_msg(m:Message): await delete_word(int(m.text.split()[-1])); await m.answer('✅ Supprimé si existant.')
 @router.callback_query(F.data=='admin:rules')
 async def rules_menu(c:CallbackQuery, state:FSMContext): await state.set_state(SetRules.text); await c.message.answer('Envoie le nouveau règlement :'); await c.answer()
 @router.message(SetRules.text)
