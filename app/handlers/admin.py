@@ -88,9 +88,24 @@ async def admin_closed(c:CallbackQuery):
 async def words_menu(c:CallbackQuery):
     await c.message.edit_text('🚫 Mots interdits', reply_markup=kb([[('➕ Ajouter','admin:word_add')],[('📋 Voir liste','admin:word_list')],[('❌ Supprimer','admin:word_del')],[('⬅ Retour','nav:admin')]])); await c.answer()
 @router.callback_query(F.data=='admin:word_add')
-async def word_add(c:CallbackQuery, state:FSMContext): await state.set_state(AddWord.word); await c.message.answer('Mot ou expression à ajouter :'); await c.answer()
-@router.message(AddWord.word)
-async def word_add_msg(m:Message, state:FSMContext): await add_word(m.text,m.from_user.id); await state.clear(); await m.answer('✅ Mot ajouté.')
+async def word_add(c:CallbackQuery, state:FSMContext):
+    if not await guard_admin(c): return
+    await state.clear()
+    await state.update_data(word_source='admin')
+    await state.set_state(AddWord.word)
+    await c.message.answer('Mot ou expression à ajouter :')
+    await c.answer()
+
+@router.message(AddWord.word, F.chat.type == 'private')
+async def word_add_msg(m:Message, state:FSMContext):
+    status = await add_word(m.text, m.from_user.id)
+    await state.clear()
+    if status == 'empty':
+        await m.answer('❌ Mot vide. Recommence depuis le menu Mots interdits.')
+    elif status == 'exists':
+        await m.answer('ℹ️ Ce mot existe déjà dans la liste.')
+    else:
+        await m.answer(f'✅ Mot ajouté : {m.text.strip()}')
 @router.callback_query(F.data=='admin:word_list')
 async def word_list(c:CallbackQuery):
     words=await list_words(); await c.message.answer('Mots interdits:\n'+'\n'.join(f'#{w.id} {w.word}' for w in words) if words else 'Aucun mot.'); await c.answer()

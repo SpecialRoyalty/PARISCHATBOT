@@ -24,6 +24,8 @@ async def send_user_panel(chat_or_msg):
 
 @router.message(CommandStart())
 async def start(message:Message, state=None, bot=None):
+    if state is not None:
+        await state.clear()
     await upsert_user(message.from_user)
     arg=(message.text or '').split(maxsplit=1)
     if len(arg)>1 and arg[1].startswith('vote_'):
@@ -44,20 +46,25 @@ async def start(message:Message, state=None, bot=None):
         await show_user_panel_msg(message)
 
 @router.callback_query(F.data=='nav:user')
-async def cb_user(c:CallbackQuery):
+async def cb_user(c:CallbackQuery, state=None):
+    if state is not None: await state.clear()
     await c.message.answer('👤 Panel utilisateur', reply_markup=user_panel()); await c.answer()
 @router.callback_query(F.data=='nav:trusted')
-async def cb_trusted(c:CallbackQuery):
+async def cb_trusted(c:CallbackQuery, state=None):
+    if state is not None: await state.clear()
     await c.message.answer('🤝 Panel Trusted', reply_markup=trusted_panel()); await c.answer()
 @router.callback_query(F.data=='nav:admin')
-async def cb_admin(c:CallbackQuery):
+async def cb_admin(c:CallbackQuery, state=None):
+    if state is not None: await state.clear()
     await c.message.answer('🛡 Panel Admin', reply_markup=admin_panel()); await c.answer()
 @router.callback_query(F.data=='nav:super')
-async def cb_super(c:CallbackQuery):
+async def cb_super(c:CallbackQuery, state=None):
+    if state is not None: await state.clear()
     await c.message.answer('👑 Panel Super Admin', reply_markup=super_panel()); await c.answer()
 
 @router.callback_query(F.data=='back')
-async def cb_back(c:CallbackQuery):
+async def cb_back(c:CallbackQuery, state=None):
+    if state is not None: await state.clear()
     await c.message.answer('Retour au panel utilisateur.', reply_markup=user_panel()); await c.answer()
 
 @router.callback_query(F.data=='user:matches')
