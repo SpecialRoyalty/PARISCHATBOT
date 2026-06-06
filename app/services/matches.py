@@ -1,8 +1,8 @@
 from datetime import datetime
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from sqlalchemy.exc import IntegrityError
 from app.db.session import SessionLocal
-from app.db.models import Match, Prediction, User, SecurityLog
+from app.db.models import Match, Prediction, User, ResultPrompt, SecurityLog
 from app.config import settings
 from app.utils.text import parse_title, anonymize
 from app.services.badges import award_badges_for_user
@@ -79,6 +79,30 @@ async def matches_to_close():
     async with SessionLocal() as s:
         res=await s.execute(select(Match).where(Match.status=='locked', Match.end_at!=None, Match.end_at<=datetime.utcnow()))
         return res.scalars().all()
+
+async def delete_result_prompts(bot, mid:int):
+    async with SessionLocal() as s:
+        prompts=(await s.execute(select(ResultPrompt).where(ResultPrompt.match_id==mid))).scalars().all()
+        for p in prompts:
+            try:
+                await bot.delete_message(p.user_id, p.message_id)
+            except Exception:
+                pass
+            await s.delete(p)
+        await s.commit()
+
+async def register_result_prompt(mid:int, user_id:int, message_id:int):
+    async with SessionLocal() as s:
+        exists=(await s.execute(select(ResultPrompt).where(ResultPrompt.match_id==mid, ResultPrompt.user_id==user_id))).scalar_one_or_none()
+        if exists:
+            return False
+        s.add(ResultPrompt(match_id=mid, user_id=user_id, message_id=message_id))
+        await s.commit()
+        return True
+
+async def result_prompt_exists(mid:int):
+    async with SessionLocal() as s:
+        return (await s.execute(select(func.count(ResultPrompt.id)).where(ResultPrompt.match_id==mid))).scalar() or 0
 
 async def close_match(mid:int, winner:str, score:str|None):
     async with SessionLocal() as s:

@@ -4,7 +4,7 @@ from sqlalchemy import select
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from app.config import settings
 from app.services.settings import get_setting, set_setting, DEFAULT_RULES
-from app.services.matches import lock_started_matches, matches_to_close
+from app.services.matches import lock_started_matches, matches_to_close, result_prompt_exists, register_result_prompt
 from app.db.session import SessionLocal
 from app.db.models import User, Role
 from app.utils.text import anonymize
@@ -71,11 +71,16 @@ async def periodic(bot):
     due=await matches_to_close()
     if not due: return
     async with SessionLocal() as s:
-        ids=(await s.execute(select(Role.user_id).where(Role.role.in_(['admin','super_admin'])))).scalars().all()
+        ids=(await s.execute(select(Role.user_id).where(Role.role.in_(['admin','super_admin','trusted'])))).scalars().all()
     for m in due:
-        for uid in set(ids):
+        # Une seule vague de demandes par match : le scheduler tourne chaque minute,
+        # donc on ne renvoie rien si des demandes existent déjà.
+        if await result_prompt_exists(m.id):
+            continue
+        for uid in sorted(set(ids)):
             try:
-                await bot.send_message(uid,f'⏱ Match terminé : {m.title}\nQui a gagné ?',reply_markup=close_result_kb(m.id,m.team_a,m.team_b))
+                msg = await bot.send_message(uid, f'⏱ Match terminé : {m.title}\nQui a gagné ?', reply_markup=close_result_kb(m.id, m.team_a, m.team_b))
+                await register_result_prompt(m.id, uid, msg.message_id)
             except Exception:
                 pass
 
