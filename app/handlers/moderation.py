@@ -55,11 +55,22 @@ async def group_guard(m:Message, bot):
         try: await bot.ban_chat_member(settings.GROUP_ID,m.from_user.id)
         except Exception: pass
         await log('LINK_BAN',m.from_user.id,text[:200]); return
-    # commands
+    # commands non autorisées dans le groupe
+    # /start dans le groupe ne doit jamais déclencher de panel public.
+    # Admin/Trusted/Super : suppression silencieuse, pas de sanction.
+    # Utilisateur normal : suppression + sanction silencieuse.
     if text.startswith('/'):
         try: await m.delete()
         except Exception: pass
-        try: await bot.restrict_chat_member(settings.GROUP_ID,m.from_user.id,permissions=ChatPermissions(can_send_messages=False))
+        if await is_trusted(m.from_user.id):
+            await log('COMMAND_DELETED_ALLOWED_ROLE', m.from_user.id, text[:100])
+            return
+        try:
+            await bot.restrict_chat_member(
+                settings.GROUP_ID,
+                m.from_user.id,
+                permissions=ChatPermissions(can_send_messages=False)
+            )
         except Exception: pass
         await log('COMMAND_MUTE',m.from_user.id,text[:100]); return
     # forbidden words

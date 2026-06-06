@@ -22,7 +22,7 @@ async def show_user_panel_msg(msg:Message):
 async def send_user_panel(chat_or_msg):
     await chat_or_msg.answer('👤 Panel utilisateur', reply_markup=user_panel())
 
-@router.message(CommandStart())
+@router.message(CommandStart(), F.chat.type == 'private')
 async def start(message:Message, state=None, bot=None):
     await upsert_user(message.from_user)
     arg=(message.text or '').split(maxsplit=1)
