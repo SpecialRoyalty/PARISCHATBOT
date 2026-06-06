@@ -4,7 +4,7 @@ from aiogram.fsm.context import FSMContext
 from app.keyboards.common import category_kb, admin_panel, kb
 from app.states import CreateMatch, SetRules, AddWord, CloseMatch
 from app.utils.dates import parse_dt
-from app.services.matches import create_match, active_matches, closed_matches, match_stats, close_match, pending_matches, get_match
+from app.services.matches import create_match, active_matches, closed_matches, match_stats, close_match, pending_matches, get_match, delete_result_prompts
 from app.services.settings import set_setting, DEFAULT_RULES, get_setting
 from app.services.moderation import add_word, list_words, delete_word
 from app.services.roles import is_admin
@@ -66,16 +66,18 @@ async def close_choose(c:CallbackQuery):
     from app.keyboards.matches import close_result_kb
     await c.message.answer(f'Clôture : {m.title}\nQui a gagné ?', reply_markup=close_result_kb(mid,m.team_a,m.team_b)); await c.answer()
 @router.callback_query(F.data.startswith('close:'))
-async def close_winner(c:CallbackQuery, state:FSMContext):
+async def close_winner(c:CallbackQuery, state:FSMContext, bot):
     _,mid,winner=c.data.split(':')
+    # Dès qu'un admin/trusted répond, on supprime la demande chez tous les autres.
+    await delete_result_prompts(bot, int(mid))
     if winner=='cancel':
         await close_match(int(mid),'cancelled',None); await c.message.answer('Match annulé/clôturé.'); await c.answer(); return
     await state.update_data(close_mid=int(mid), close_winner=winner); await state.set_state(CloseMatch.score); await c.message.answer('Score exact ? Exemple : 2-1'); await c.answer()
 @router.message(CloseMatch.score, F.chat.type=='private', F.text.regexp(r'^\d+\s*-\s*\d+$'))
-async def close_score(m:Message, state:FSMContext):
+async def close_score(m:Message, state:FSMContext, bot):
     data=await state.get_data()
     if not data.get('close_mid'): return
-    await close_match(data['close_mid'],data['close_winner'],m.text.replace(' ','')); await state.clear(); await m.answer('✅ Match clôturé, statistiques mises à jour.')
+    await close_match(data['close_mid'],data['close_winner'],m.text.replace(' ','')); await delete_result_prompts(bot, data['close_mid']); await state.clear(); await m.answer('✅ Match clôturé, statistiques mises à jour.')
 
 @router.callback_query(F.data=='admin:closed')
 async def admin_closed(c:CallbackQuery):
