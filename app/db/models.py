@@ -122,3 +122,12 @@ class UsernameHistory(Base):
     field: Mapped[str] = mapped_column(String(32))
     public_announced_at: Mapped[datetime|None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class ResultPrompt(Base):
+    __tablename__='result_prompts'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey('matches.id'))
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    message_id: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    __table_args__=(UniqueConstraint('match_id','user_id',name='uix_result_prompt_match_user'),)
